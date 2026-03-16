@@ -20,6 +20,9 @@ export function buildEnvVars(env: MoltbotEnv): Record<string, string> {
     envVars.CF_AI_GATEWAY_GATEWAY_ID = env.CF_AI_GATEWAY_GATEWAY_ID;
   }
 
+  // Codex-only mode (no API key, OAuth at /debug/oauth-codex)
+  if (env.CODEX_ONLY) envVars.CODEX_ONLY = env.CODEX_ONLY;
+
   // Direct provider keys
   if (env.ANTHROPIC_API_KEY) envVars.ANTHROPIC_API_KEY = env.ANTHROPIC_API_KEY;
   if (env.OPENAI_API_KEY) envVars.OPENAI_API_KEY = env.OPENAI_API_KEY;

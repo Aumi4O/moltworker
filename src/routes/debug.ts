@@ -9,6 +9,48 @@ import { findExistingMoltbotProcess } from '../gateway';
  */
 const debug = new Hono<AppEnv>();
 
+// When invoked via middleware (bypassing route), sandbox is passed in env
+debug.use('*', async (c, next) => {
+  const env = c.env as AppEnv['Bindings'] & { __sandbox?: import('@cloudflare/sandbox').Sandbox };
+  if (env.__sandbox) {
+    c.set('sandbox', env.__sandbox);
+  }
+  return next();
+});
+
+// GET /debug or /debug/ - Debug index page (no gateway required)
+debug.get('/', (c) => {
+  const host = c.req.header('host') || 'localhost';
+  const protocol = c.req.header('x-forwarded-proto') || 'https';
+  const base = `${protocol}://${host}`;
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Debug - Moltworker</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 600px; margin: 40px auto; padding: 20px; background: #1a1a2e; color: #e0e0e0; }
+    h1 { font-size: 1.4rem; margin-bottom: 24px; }
+    a { color: #60a5fa; text-decoration: none; display: block; padding: 12px; background: #16213e; border-radius: 6px; margin-bottom: 8px; }
+    a:hover { background: #0f3460; }
+    .desc { font-size: 0.85rem; color: #94a3b8; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <h1>Debug</h1>
+  <a href="${base}/debug/oauth-codex"><strong>Codex OAuth</strong><span class="desc">Start gateway, sign in, connect Codex</span></a>
+  <a href="${base}/debug/processes">Processes<span class="desc">List running processes</span></a>
+  <a href="${base}/debug/version">Version<span class="desc">OpenClaw and Node versions</span></a>
+  <a href="${base}/debug/env">Env<span class="desc">Environment config (sanitized)</span></a>
+  <a href="${base}/debug/container-config">Container config<span class="desc">openclaw.json from container</span></a>
+  <a href="${base}/debug/logs">Logs<span class="desc">Gateway process logs</span></a>
+</body>
+</html>`;
+
+  return c.html(html);
+});
+
 // GET /debug/version - Returns version info from inside the container
 debug.get('/version', async (c) => {
   const sandbox = c.get('sandbox');
@@ -344,6 +386,201 @@ debug.get('/ws-test', async (c) => {
 
   return c.html(html);
 });
+
+// GET /debug/oauth-codex - Codex OAuth setup page
+debug.get('/oauth-codex', async (c) => {
+  const host = c.req.header('host') || 'localhost';
+  const protocol = c.req.header('x-forwarded-proto') || 'https';
+  const baseUrl = `${protocol}://${host}`;
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Codex OAuth - Moltworker</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 560px; margin: 40px auto; padding: 20px; background: #1a1a2e; color: #e0e0e0; }
+    h1 { font-size: 1.4rem; margin-bottom: 24px; }
+    .step { background: #16213e; padding: 20px; border-radius: 8px; margin-bottom: 16px; }
+    .step-num { display: inline-block; width: 24px; height: 24px; background: #0f3460; border-radius: 50%; text-align: center; line-height: 24px; margin-right: 8px; }
+    .btn { background: #3b82f6; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-size: 1rem; }
+    .btn:hover { background: #2563eb; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    input { width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #333; background: #1a1a2e; color: #e0e0e0; margin: 8px 0; }
+    .status { font-size: 0.9rem; margin-top: 8px; color: #94a3b8; }
+    .success { color: #4ade80; }
+    .error { color: #f87171; }
+    a { color: #60a5fa; }
+  </style>
+</head>
+<body>
+  <h1>Codex OAuth Setup</h1>
+  <p style="margin-bottom: 24px; color: #94a3b8;">Use your free Codex subscription. No API key needed.</p>
+
+  <div class="step">
+    <p><span class="step-num">0</span><strong>Start gateway</strong></p>
+    <p style="margin: 12px 0; font-size: 0.9rem; color: #94a3b8;">The gateway must be running before OAuth. Set <code>CODEX_ONLY=true</code> via <code>wrangler secret put CODEX_ONLY</code> if you have no API key.</p>
+    <button class="btn" id="startBtn" onclick="startGateway()">Start gateway</button>
+    <p id="step0Status" class="status"></p>
+  </div>
+
+  <div class="step">
+    <p><span class="step-num">1</span><strong>Sign in with ChatGPT</strong></p>
+    <p style="margin: 12px 0; font-size: 0.9rem;">Open this link and sign in with your OpenAI account:</p>
+    <a href="https://auth.openai.com/oauth/authorize?client_id=codex&response_type=code&redirect_uri=http://localhost:1455/auth/callback&scope=openid%20profile%20email%20offline_access" target="_blank" rel="noopener" class="btn" style="display: inline-block; text-decoration: none;">Sign in with ChatGPT</a>
+  </div>
+
+  <div class="step">
+    <p><span class="step-num">2</span><strong>Paste the redirect URL</strong></p>
+    <p style="margin: 12px 0; font-size: 0.9rem;">After signing in, copy the full URL from your browser and paste it here:</p>
+    <input type="text" id="callbackUrl" placeholder="http://localhost:1455/auth/callback?code=...&scope=...&state=..." />
+    <button class="btn" id="connectBtn" onclick="connectCodex()" style="margin-top: 8px;">Connect</button>
+    <p id="step2Status" class="status"></p>
+  </div>
+
+  <div class="step">
+    <p><span class="step-num">3</span><strong>Go to Chat</strong></p>
+    <p style="margin: 12px 0; font-size: 0.9rem;">Once connected, open the chat:</p>
+    <a href="${baseUrl}/" class="btn" style="display: inline-block; text-decoration: none;">Go to Chat</a>
+  </div>
+
+  <script>
+    async function startGateway() {
+      const btn = document.getElementById('startBtn');
+      const status = document.getElementById('step0Status');
+      btn.disabled = true;
+      status.textContent = 'Starting... (this may take 1-2 minutes)';
+      status.className = 'status';
+      try {
+        const r = await fetch('${baseUrl}/debug/start-gateway', { method: 'POST', credentials: 'include' });
+        const data = await r.json();
+        if (data.status === 'running' || data.ok) {
+          status.textContent = 'Gateway is running.';
+          status.className = 'status success';
+        } else {
+          status.textContent = data.message || data.error || 'Failed';
+          status.className = 'status error';
+          if ((data.message || '').includes('ANTHROPIC_API_KEY')) {
+            status.textContent += ' Set CODEX_ONLY=true: wrangler secret put CODEX_ONLY';
+          }
+        }
+      } catch (e) {
+        status.textContent = 'Error: ' + e.message;
+        status.className = 'status error';
+      }
+      btn.disabled = false;
+    }
+    async function connectCodex() {
+      const url = document.getElementById('callbackUrl').value.trim();
+      const status = document.getElementById('step2Status');
+      if (!url) { status.textContent = 'Paste the URL first'; status.className = 'status error'; return; }
+      status.textContent = 'Connecting...';
+      status.className = 'status';
+      try {
+        const r = await fetch('${baseUrl}/debug/oauth-codex/exchange', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ callbackUrl: url }),
+          credentials: 'include'
+        });
+        const data = await r.json();
+        if (data.ok || data.success) {
+          status.textContent = 'Connected! Go to Chat.';
+          status.className = 'status success';
+        } else {
+          status.textContent = data.error || data.message || 'Failed';
+          status.className = 'status error';
+        }
+      } catch (e) {
+        status.textContent = 'Error: ' + e.message;
+        status.className = 'status error';
+      }
+    }
+  </script>
+</body>
+</html>`;
+
+  return c.html(html);
+});
+
+// POST /debug/oauth-codex/exchange - Exchange OAuth callback URL for tokens
+debug.post('/oauth-codex/exchange', async (c) => {
+  const sandbox = c.get('sandbox');
+  let body: { callbackUrl?: string };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  const callbackUrl = body?.callbackUrl?.trim();
+  if (!callbackUrl) {
+    return c.json({ error: 'callbackUrl is required' }, 400);
+  }
+
+  const existing = await findExistingMoltbotProcess(sandbox);
+  if (!existing) {
+    return c.json({ error: 'Gateway not running. Start the gateway first.' }, 503);
+  }
+
+  try {
+    const gatewayUrl = `http://localhost:18789/auth/openai-codex/callback?url=${encodeURIComponent(callbackUrl)}`;
+    const r = await sandbox.containerFetch(new Request(gatewayUrl, { method: 'POST' }), 18789);
+    const data = (await r.json().catch(() => ({}))) as Record<string, unknown>;
+    return c.json(
+      r.ok ? { ok: true, ...data } : { error: String(data?.error ?? r.statusText) },
+      r.status as 200 | 400 | 503,
+    );
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Unknown error';
+    return c.json({ error: msg }, 500);
+  }
+});
+
+async function handleStartGateway(c: import('hono').Context<AppEnv>) {
+  const sandbox = c.get('sandbox');
+  const { ensureMoltbotGateway } = await import('../gateway');
+  try {
+    await ensureMoltbotGateway(sandbox, c.env);
+    return c.json({ status: 'running', ok: true });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : 'Unknown error';
+    let stderr = '';
+    let stdout = '';
+    try {
+      const procs = await sandbox.listProcesses();
+      const gatewayProc = procs.find(
+        (p) =>
+          p.command.includes('start-openclaw.sh') || p.command.includes('openclaw gateway'),
+      );
+      if (gatewayProc) {
+        const logs = await gatewayProc.getLogs();
+        stderr = logs.stderr || '';
+        stdout = logs.stdout || '';
+      }
+    } catch {
+      /* ignore */
+    }
+    return c.json(
+      {
+        status: 'error',
+        message: msg,
+        stderr: stderr || undefined,
+        stdout: stdout || undefined,
+        hint:
+          msg.includes('ANTHROPIC_API_KEY') || msg.includes('auth')
+            ? 'Set CODEX_ONLY=true: wrangler secret put CODEX_ONLY'
+            : 'Check worker logs: npx wrangler tail',
+      },
+      503,
+    );
+  }
+}
+
+// POST /debug/start-gateway - Start the gateway (for Codex OAuth flow)
+debug.post('/start-gateway', handleStartGateway);
+
+// GET /debug/start-gateway - Same as POST (for direct URL access / debugging)
+debug.get('/start-gateway', handleStartGateway);
 
 // GET /debug/env - Show environment configuration (sanitized)
 debug.get('/env', async (c) => {

@@ -125,7 +125,10 @@ if [ ! -f "$CONFIG_FILE" ]; then
     echo "No existing config found, running openclaw onboard..."
 
     AUTH_ARGS=""
-    if [ -n "$CLOUDFLARE_AI_GATEWAY_API_KEY" ] && [ -n "$CF_AI_GATEWAY_ACCOUNT_ID" ] && [ -n "$CF_AI_GATEWAY_GATEWAY_ID" ]; then
+    if [ "$CODEX_ONLY" = "true" ]; then
+        echo "CODEX_ONLY mode: using --auth-choice skip (OAuth at /debug/oauth-codex)"
+        AUTH_ARGS="--auth-choice skip"
+    elif [ -n "$CLOUDFLARE_AI_GATEWAY_API_KEY" ] && [ -n "$CF_AI_GATEWAY_ACCOUNT_ID" ] && [ -n "$CF_AI_GATEWAY_GATEWAY_ID" ]; then
         AUTH_ARGS="--auth-choice cloudflare-ai-gateway-api-key \
             --cloudflare-ai-gateway-account-id $CF_AI_GATEWAY_ACCOUNT_ID \
             --cloudflare-ai-gateway-gateway-id $CF_AI_GATEWAY_GATEWAY_ID \
@@ -134,6 +137,8 @@ if [ ! -f "$CONFIG_FILE" ]; then
         AUTH_ARGS="--auth-choice apiKey --anthropic-api-key $ANTHROPIC_API_KEY"
     elif [ -n "$OPENAI_API_KEY" ]; then
         AUTH_ARGS="--auth-choice openai-api-key --openai-api-key $OPENAI_API_KEY"
+    else
+        AUTH_ARGS="--auth-choice skip"
     fi
 
     openclaw onboard --non-interactive --accept-risk \
@@ -184,8 +189,9 @@ if (process.env.OPENCLAW_GATEWAY_TOKEN) {
     config.gateway.auth.token = process.env.OPENCLAW_GATEWAY_TOKEN;
 }
 
+// controlUi: only keep allowInsecureAuth (strip deprecated keys from old R2 backups)
+config.gateway.controlUi = {};
 if (process.env.OPENCLAW_DEV_MODE === 'true') {
-    config.gateway.controlUi = config.gateway.controlUi || {};
     config.gateway.controlUi.allowInsecureAuth = true;
 }
 
@@ -283,6 +289,15 @@ if (process.env.SLACK_BOT_TOKEN && process.env.SLACK_APP_TOKEN) {
 fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 console.log('Configuration patched successfully');
 EOFPATCH
+
+# ============================================================
+# FIX CONFIG (remove deprecated/unrecognized keys)
+# ============================================================
+if openclaw doctor --fix 2>&1; then
+    echo "Config fixed by openclaw doctor"
+else
+    echo "openclaw doctor skipped or failed (non-fatal)"
+fi
 
 # ============================================================
 # START GATEWAY

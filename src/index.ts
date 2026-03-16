@@ -73,6 +73,7 @@ function validateRequiredEnv(env: MoltbotEnv): string[] {
   }
 
   // Check for AI provider configuration (at least one must be set)
+  const isCodexOnly = String(env.CODEX_ONLY ?? '').trim().toLowerCase() === 'true';
   const hasCloudflareGateway = !!(
     env.CLOUDFLARE_AI_GATEWAY_API_KEY &&
     env.CF_AI_GATEWAY_ACCOUNT_ID &&
@@ -82,9 +83,9 @@ function validateRequiredEnv(env: MoltbotEnv): string[] {
   const hasAnthropicKey = !!env.ANTHROPIC_API_KEY;
   const hasOpenAIKey = !!env.OPENAI_API_KEY;
 
-  if (!hasCloudflareGateway && !hasLegacyGateway && !hasAnthropicKey && !hasOpenAIKey) {
+  if (!isCodexOnly && !hasCloudflareGateway && !hasLegacyGateway && !hasAnthropicKey && !hasOpenAIKey) {
     missing.push(
-      'ANTHROPIC_API_KEY, OPENAI_API_KEY, or CLOUDFLARE_AI_GATEWAY_API_KEY + CF_AI_GATEWAY_ACCOUNT_ID + CF_AI_GATEWAY_GATEWAY_ID',
+      'ANTHROPIC_API_KEY, OPENAI_API_KEY, CODEX_ONLY=true, or CLOUDFLARE_AI_GATEWAY_*',
     );
   }
 
@@ -144,12 +145,34 @@ app.use('*', async (c, next) => {
 // PUBLIC ROUTES: No Cloudflare Access authentication required
 // =============================================================================
 
-// Mount public routes first (before auth middleware)
-// Includes: /sandbox-health, /logo.png, /logo-small.png, /api/status, /_admin/assets/*
-app.route('/', publicRoutes);
-
 // Mount CDP routes (uses shared secret auth via query param, not CF Access)
 app.route('/cdp', cdp);
+
+// Handle /debug via middleware BEFORE route('/') - guarantees we never hit catch-all.
+// Hono's route('/') can match before route('/debug'); this short-circuits for /debug/*.
+app.use('*', async (c, next) => {
+  const url = new URL(c.req.url);
+  if (!url.pathname.startsWith('/debug')) return next();
+
+  if (c.env.DEBUG_ROUTES !== 'true') {
+    return c.json({ error: 'Debug routes are disabled', hint: 'Set DEBUG_ROUTES=true' }, 404);
+  }
+
+  // Rewrite path: /debug/oauth-codex -> /oauth-codex so debug app routes match
+  const pathWithoutDebug = url.pathname.replace(/^\/debug\/?/, '/') || '/';
+  const rewrittenUrl = new URL(pathWithoutDebug + url.search, url.origin);
+  const rewrittenReq = new Request(rewrittenUrl.toString(), c.req.raw);
+
+  // Pass sandbox to debug app (it uses c.get('sandbox') - not in env by default)
+  const envWithSandbox = { ...c.env, __sandbox: c.get('sandbox') } as AppEnv['Bindings'] & {
+    __sandbox: Sandbox;
+  };
+  return debug.fetch(rewrittenReq, envWithSandbox, c.executionCtx);
+});
+
+// Mount public routes (before auth middleware)
+// Includes: /sandbox-health, /logo.png, /logo-small.png, /api/status, /_admin/assets/*
+app.route('/', publicRoutes);
 
 // =============================================================================
 // PROTECTED ROUTES: Cloudflare Access authentication required
@@ -213,23 +236,20 @@ app.route('/api', api);
 // Mount Admin UI routes (protected by Cloudflare Access)
 app.route('/_admin', adminUi);
 
-// Mount debug routes (protected by Cloudflare Access, only when DEBUG_ROUTES is enabled)
-app.use('/debug/*', async (c, next) => {
-  if (c.env.DEBUG_ROUTES !== 'true') {
-    return c.json({ error: 'Debug routes are disabled' }, 404);
-  }
-  return next();
-});
-app.route('/debug', debug);
-
 // =============================================================================
 // CATCH-ALL: Proxy to Moltbot gateway
 // =============================================================================
 
 app.all('*', async (c) => {
+  const url = new URL(c.req.url);
+
+  // Never show loading page for /debug - debug routes must handle these
+  if (url.pathname.startsWith('/debug')) {
+    return c.json({ error: 'Debug route not matched', path: url.pathname, hint: 'Ensure DEBUG_ROUTES=true' }, 404);
+  }
+
   const sandbox = c.get('sandbox');
   const request = c.req.raw;
-  const url = new URL(request.url);
 
   console.log('[PROXY] Handling request:', url.pathname);
 
@@ -263,8 +283,9 @@ app.all('*', async (c) => {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
     let hint = 'Check worker logs with: wrangler tail';
-    if (!c.env.ANTHROPIC_API_KEY) {
-      hint = 'ANTHROPIC_API_KEY is not set. Run: wrangler secret put ANTHROPIC_API_KEY';
+    const isCodexOnly = String(c.env.CODEX_ONLY ?? '').trim().toLowerCase() === 'true';
+    if (!isCodexOnly && !c.env.ANTHROPIC_API_KEY && !c.env.OPENAI_API_KEY) {
+      hint = 'Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or CODEX_ONLY=true. For Codex: wrangler secret put CODEX_ONLY';
     } else if (errorMessage.includes('heap out of memory') || errorMessage.includes('OOM')) {
       hint = 'Gateway ran out of memory. Try again or check for memory leaks.';
     }
