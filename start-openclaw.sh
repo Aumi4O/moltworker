@@ -118,6 +118,25 @@ if [ -d "$BACKUP_DIR/skills" ] && [ "$(ls -A $BACKUP_DIR/skills 2>/dev/null)" ];
     fi
 fi
 
+# Seed workspace templates (HEARTBEAT.md, SOUL.md, etc.)
+# HEARTBEAT.md and SOUL.md are always overwritten to stop doctor/exec spam in chat
+# Other templates (MEMORY.md, USER.md, AGENTS.md) are only copied when missing
+TEMPLATES_DIR="/usr/share/openclaw-templates/workspace"
+if [ -d "$TEMPLATES_DIR" ]; then
+    for f in "${TEMPLATES_DIR}"/*.md; do
+        [ -f "$f" ] || continue
+        base="${f##*/}"
+        dest="$WORKSPACE_DIR/$base"
+        if [ "$base" = "HEARTBEAT.md" ] || [ "$base" = "SOUL.md" ]; then
+            echo "Updating workspace template: $base"
+            cp "$f" "$dest"
+        elif [ ! -f "$dest" ]; then
+            echo "Seeding workspace template: $base"
+            cp "$f" "$dest"
+        fi
+    done
+fi
+
 # ============================================================
 # ONBOARD (only if no config exists yet)
 # ============================================================
@@ -189,8 +208,8 @@ if (process.env.OPENCLAW_GATEWAY_TOKEN) {
     config.gateway.auth.token = process.env.OPENCLAW_GATEWAY_TOKEN;
 }
 
-// controlUi: only keep allowInsecureAuth (strip deprecated keys from old R2 backups)
-config.gateway.controlUi = {};
+// controlUi: merge allowInsecureAuth, preserve other keys from onboard
+config.gateway.controlUi = config.gateway.controlUi || {};
 if (process.env.OPENCLAW_DEV_MODE === 'true') {
     config.gateway.controlUi.allowInsecureAuth = true;
 }
@@ -286,18 +305,41 @@ if (process.env.SLACK_BOT_TOKEN && process.env.SLACK_APP_TOKEN) {
     };
 }
 
+// CDP URL for browser automation - point OpenClaw at dedicated CDP worker (e.g. moltbot-cdp)
+// Avoids Access-protected moltbot-sandbox/cdp. cloudflare-browser skill uses "cloudflare" profile.
+// OpenClaw requires color as RRGGBB hex on every browser profile (schema validation).
+const validColor = '3498db'; // RRGGBB, required by OpenClaw
+if (process.env.OPENCLAW_CDP_URL) {
+    config.browser = config.browser || {};
+    const cdpUrl = process.env.OPENCLAW_CDP_URL;
+    const profile = { cdpUrl, color: validColor };
+    config.browser.profiles = {
+        ...(config.browser.profiles || {}),
+        default: profile,
+        cloudflare: profile,
+    };
+    console.log('CDP URL configured:', cdpUrl.replace(/secret=[^&]+/, 'secret=***'));
+}
+// Always fix invalid/missing color on any browser profile (from R2 backup or elsewhere)
+config.browser = config.browser || {};
+config.browser.profiles = config.browser.profiles || {};
+for (const name of Object.keys(config.browser.profiles)) {
+    const p = config.browser.profiles[name];
+    if (!p || typeof p !== 'object') continue;
+    if (!/^[0-9a-fA-F]{6}$/.test(p.color)) {
+        config.browser.profiles[name] = { ...p, color: validColor };
+    }
+}
+
 fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 console.log('Configuration patched successfully');
 EOFPATCH
 
 # ============================================================
 # FIX CONFIG (remove deprecated/unrecognized keys)
+# Skip doctor if it might crash (SecretRef, etc.) - non-fatal for startup
 # ============================================================
-if openclaw doctor --fix 2>&1; then
-    echo "Config fixed by openclaw doctor"
-else
-    echo "openclaw doctor skipped or failed (non-fatal)"
-fi
+openclaw doctor --fix 2>&1 || true
 
 # ============================================================
 # START GATEWAY

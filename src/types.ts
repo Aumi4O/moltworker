@@ -43,6 +43,8 @@ export interface MoltbotEnv {
   BROWSER?: Fetcher;
   CDP_SECRET?: string; // Shared secret for CDP endpoint authentication
   WORKER_URL?: string; // Public URL of the worker (for CDP endpoint)
+  /** Full CDP WebSocket URL for OpenClaw browser profiles (e.g. wss://moltbot-cdp.../cdp?secret=...) */
+  OPENCLAW_CDP_URL?: string;
 }
 
 /**

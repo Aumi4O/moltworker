@@ -137,3 +137,30 @@ export async function triggerSync(): Promise<SyncResponse> {
     method: 'POST',
   });
 }
+
+export interface BackupEntry {
+  timestamp: string;
+  displayName: string;
+}
+
+export interface ListBackupsResponse {
+  backups: BackupEntry[];
+  error?: string;
+}
+
+export async function listBackups(): Promise<ListBackupsResponse> {
+  return apiRequest<ListBackupsResponse>('/storage/backups');
+}
+
+export interface RestoreResponse {
+  success: boolean;
+  error?: string;
+  details?: string;
+}
+
+export async function restoreBackup(timestamp: string): Promise<RestoreResponse> {
+  return apiRequest<RestoreResponse>('/storage/restore', {
+    method: 'POST',
+    body: JSON.stringify({ timestamp }),
+  });
+}

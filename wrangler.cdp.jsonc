@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "moltbot-cdp",
+  "main": "src/cdp-worker.ts",
+  "compatibility_date": "2025-05-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
+  // Browser Rendering binding - required for CDP
+  "browser": {
+    "binding": "BROWSER"
+  },
+  // NO Cloudflare Access - this worker is NOT added to any Access application.
+  // Auth is via CDP_SECRET query param only.
+  //
+  // Secrets (set for this worker):
+  //   npx wrangler secret put CDP_SECRET --config wrangler.cdp.jsonc
+  //
+  // URL: https://moltbot-cdp.alex-94f.workers.dev/cdp?secret=<CDP_SECRET>
+}

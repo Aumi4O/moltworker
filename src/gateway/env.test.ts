@@ -144,6 +144,18 @@ describe('buildEnvVars', () => {
     expect(result.CF_ACCOUNT_ID).toBe('acct-123');
   });
 
+  it('passes CDP vars including OPENCLAW_CDP_URL for dedicated CDP worker', () => {
+    const env = createMockEnv({
+      CDP_SECRET: 'my-cdp-secret',
+      WORKER_URL: 'https://moltbot-sandbox.example.com',
+      OPENCLAW_CDP_URL: 'wss://moltbot-cdp.example.com/cdp?secret=my-cdp-secret',
+    });
+    const result = buildEnvVars(env);
+    expect(result.CDP_SECRET).toBe('my-cdp-secret');
+    expect(result.WORKER_URL).toBe('https://moltbot-sandbox.example.com');
+    expect(result.OPENCLAW_CDP_URL).toBe('wss://moltbot-cdp.example.com/cdp?secret=my-cdp-secret');
+  });
+
   it('combines all env vars correctly', () => {
     const env = createMockEnv({
       ANTHROPIC_API_KEY: 'sk-key',

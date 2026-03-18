@@ -145,34 +145,12 @@ app.use('*', async (c, next) => {
 // PUBLIC ROUTES: No Cloudflare Access authentication required
 // =============================================================================
 
-// Mount CDP routes (uses shared secret auth via query param, not CF Access)
-app.route('/cdp', cdp);
-
-// Handle /debug via middleware BEFORE route('/') - guarantees we never hit catch-all.
-// Hono's route('/') can match before route('/debug'); this short-circuits for /debug/*.
-app.use('*', async (c, next) => {
-  const url = new URL(c.req.url);
-  if (!url.pathname.startsWith('/debug')) return next();
-
-  if (c.env.DEBUG_ROUTES !== 'true') {
-    return c.json({ error: 'Debug routes are disabled', hint: 'Set DEBUG_ROUTES=true' }, 404);
-  }
-
-  // Rewrite path: /debug/oauth-codex -> /oauth-codex so debug app routes match
-  const pathWithoutDebug = url.pathname.replace(/^\/debug\/?/, '/') || '/';
-  const rewrittenUrl = new URL(pathWithoutDebug + url.search, url.origin);
-  const rewrittenReq = new Request(rewrittenUrl.toString(), c.req.raw);
-
-  // Pass sandbox to debug app (it uses c.get('sandbox') - not in env by default)
-  const envWithSandbox = { ...c.env, __sandbox: c.get('sandbox') } as AppEnv['Bindings'] & {
-    __sandbox: Sandbox;
-  };
-  return debug.fetch(rewrittenReq, envWithSandbox, c.executionCtx);
-});
-
-// Mount public routes (before auth middleware)
+// Mount public routes first (before auth middleware)
 // Includes: /sandbox-health, /logo.png, /logo-small.png, /api/status, /_admin/assets/*
 app.route('/', publicRoutes);
+
+// Mount CDP routes (uses shared secret auth via query param, not CF Access)
+app.route('/cdp', cdp);
 
 // =============================================================================
 // PROTECTED ROUTES: Cloudflare Access authentication required
@@ -220,11 +198,18 @@ app.use('*', async (c, next) => {
 
 // Middleware: Cloudflare Access authentication for protected routes
 app.use('*', async (c, next) => {
+  const path = c.req.path;
+  // Skip Access for paths that use their own auth (CDP uses CDP_SECRET, OAuth has its own flow)
+  const skipPaths = ['/debug/oauth-codex', '/debug/start-gateway', '/cdp'];
+  if (skipPaths.some((p) => path === p || path.startsWith(p + '/'))) {
+    return next();
+  }
   // Determine response type based on Accept header
   const acceptsHtml = c.req.header('Accept')?.includes('text/html');
   const middleware = createAccessMiddleware({
     type: acceptsHtml ? 'html' : 'json',
     redirectOnMissing: acceptsHtml,
+    skipPaths: ['/debug/oauth-codex', '/debug/start-gateway'],
   });
 
   return middleware(c, next);
@@ -236,20 +221,26 @@ app.route('/api', api);
 // Mount Admin UI routes (protected by Cloudflare Access)
 app.route('/_admin', adminUi);
 
+// Mount debug routes - OAuth/start-gateway always enabled for Codex; others require DEBUG_ROUTES
+app.use('/debug/*', async (c, next) => {
+  const path = c.req.path;
+  const isOAuthOrStart =
+    path.startsWith('/debug/oauth-codex') || path === '/debug/start-gateway';
+  if (!isOAuthOrStart && c.env.DEBUG_ROUTES !== 'true') {
+    return c.json({ error: 'Debug routes are disabled. Set DEBUG_ROUTES=true to enable.' }, 404);
+  }
+  return next();
+});
+app.route('/debug', debug);
+
 // =============================================================================
 // CATCH-ALL: Proxy to Moltbot gateway
 // =============================================================================
 
 app.all('*', async (c) => {
-  const url = new URL(c.req.url);
-
-  // Never show loading page for /debug - debug routes must handle these
-  if (url.pathname.startsWith('/debug')) {
-    return c.json({ error: 'Debug route not matched', path: url.pathname, hint: 'Ensure DEBUG_ROUTES=true' }, 404);
-  }
-
   const sandbox = c.get('sandbox');
   const request = c.req.raw;
+  const url = new URL(request.url);
 
   console.log('[PROXY] Handling request:', url.pathname);
 
@@ -449,8 +440,16 @@ app.all('*', async (c) => {
     });
   }
 
+  // Inject gateway token for HTTP if not present (same as WebSocket)
+  let httpRequest = request;
+  if (c.env.MOLTBOT_GATEWAY_TOKEN && !url.searchParams.has('token')) {
+    const tokenUrl = new URL(url.toString());
+    tokenUrl.searchParams.set('token', c.env.MOLTBOT_GATEWAY_TOKEN);
+    httpRequest = new Request(tokenUrl.toString(), request);
+  }
+
   console.log('[HTTP] Proxying:', url.pathname + url.search);
-  const httpResponse = await sandbox.containerFetch(request, MOLTBOT_PORT);
+  const httpResponse = await sandbox.containerFetch(httpRequest, MOLTBOT_PORT);
   console.log('[HTTP] Response status:', httpResponse.status);
 
   // Add debug header to verify worker handled the request

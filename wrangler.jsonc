@@ -1,6 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "moltbot-sandbox",
+  "account_id": "e94f8d1967cde96eaaa449480e79e3d1",
   "main": "src/index.ts",
   "compatibility_date": "2025-05-06",
   "compatibility_flags": ["nodejs_compat"],
@@ -95,6 +96,8 @@
   // Browser automation (optional):
   // - CDP_SECRET: Shared secret for /cdp endpoint authentication
   // - WORKER_URL: Public URL of the worker
+  // - OPENCLAW_CDP_URL: Full CDP WebSocket URL for OpenClaw (e.g. wss://moltbot-cdp.your-subdomain.workers.dev/cdp?secret=...)
+  //   Use this to point OpenClaw at the dedicated moltbot-cdp worker instead of moltbot-sandbox/cdp
   //
   // R2 persistent storage (optional, for data persistence across sessions):
   // - R2_ACCESS_KEY_ID: R2 access key ID (from R2 API tokens)

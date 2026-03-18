@@ -4,7 +4,9 @@ import { createAccessMiddleware } from '../auth';
 import {
   ensureMoltbotGateway,
   findExistingMoltbotProcess,
+  listBackups,
   mountR2Storage,
+  restoreFromBackup,
   syncToR2,
   waitForProcess,
 } from '../gateway';
@@ -244,9 +246,69 @@ adminApi.get('/storage', async (c) => {
   });
 });
 
+// GET /api/admin/storage/backups - List versioned backups for restore picker
+adminApi.get('/storage/backups', async (c) => {
+  const sandbox = c.get('sandbox');
+  try {
+    const result = await listBackups(sandbox, c.env);
+    return c.json(result);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Unknown error';
+    return c.json({ error: msg, backups: [] }, 500);
+  }
+});
+
+// POST /api/admin/storage/restore - Restore from a specific backup
+adminApi.post('/storage/restore', async (c) => {
+  const sandbox = c.get('sandbox');
+  let body: { timestamp?: string };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  const timestamp = body?.timestamp?.trim();
+  if (!timestamp) {
+    return c.json({ error: 'timestamp is required' }, 400);
+  }
+  try {
+    const result = await restoreFromBackup(sandbox, c.env, timestamp);
+    if (result.success) {
+      // Restart gateway so it picks up the restored config
+      try {
+        const existing = await findExistingMoltbotProcess(sandbox);
+        if (existing) await existing.kill();
+        await ensureMoltbotGateway(sandbox, c.env);
+      } catch {
+        // Restart best-effort; restore succeeded
+      }
+    }
+    return c.json(result);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Unknown error';
+    return c.json({ success: false, error: msg }, 500);
+  }
+});
+
 // POST /api/admin/storage/sync - Trigger a manual sync to R2
 adminApi.post('/storage/sync', async (c) => {
   const sandbox = c.get('sandbox');
+
+  // Config is created by start-openclaw.sh when gateway starts. Ensure gateway
+  // has run at least once so config exists (restore from R2 or onboard).
+  try {
+    await ensureMoltbotGateway(sandbox, c.env);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Unknown error';
+    return c.json(
+      {
+        success: false,
+        error: 'Gateway must start before backup',
+        details: `Config is created when the gateway starts. Gateway failed: ${msg}`,
+      },
+      503,
+    );
+  }
 
   const result = await syncToR2(sandbox, c.env);
 

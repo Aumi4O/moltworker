@@ -1,0 +1,13 @@
+{
+  "name": "local-cdp-relay",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Minimal CDP relay - use your Mac's Chrome with cloud OpenClaw, no full OpenClaw install",
+  "bin": {
+    "local-cdp-relay": "relay.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

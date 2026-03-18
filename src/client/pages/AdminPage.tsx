@@ -6,11 +6,14 @@ import {
   restartGateway,
   getStorageStatus,
   triggerSync,
+  listBackups,
+  restoreBackup,
   AuthError,
   type PendingDevice,
   type PairedDevice,
   type DeviceListResponse,
   type StorageStatusResponse,
+  type BackupEntry,
 } from '../api';
 import './AdminPage.css';
 
@@ -54,6 +57,9 @@ export default function AdminPage() {
   const [actionInProgress, setActionInProgress] = useState<string | null>(null);
   const [restartInProgress, setRestartInProgress] = useState(false);
   const [syncInProgress, setSyncInProgress] = useState(false);
+  const [backups, setBackups] = useState<BackupEntry[]>([]);
+  const [backupsLoading, setBackupsLoading] = useState(false);
+  const [restoreInProgress, setRestoreInProgress] = useState<string | null>(null);
 
   const fetchDevices = useCallback(async () => {
     try {
@@ -88,10 +94,47 @@ export default function AdminPage() {
     }
   }, []);
 
+  const fetchBackups = useCallback(async () => {
+    if (!storageStatus?.configured) return;
+    setBackupsLoading(true);
+    try {
+      const res = await listBackups();
+      setBackups(res.backups || []);
+    } catch {
+      setBackups([]);
+    } finally {
+      setBackupsLoading(false);
+    }
+  }, [storageStatus?.configured]);
+
   useEffect(() => {
     fetchDevices();
     fetchStorageStatus();
   }, [fetchDevices, fetchStorageStatus]);
+
+  useEffect(() => {
+    if (storageStatus?.configured) fetchBackups();
+  }, [storageStatus?.configured, fetchBackups]);
+
+  const handleRestore = async (timestamp: string) => {
+    if (!confirm(`Restore from backup "${timestamp}"? The gateway will restart.`)) return;
+    setRestoreInProgress(timestamp);
+    try {
+      const result = await restoreBackup(timestamp);
+      if (result.success) {
+        setError(null);
+        await fetchBackups();
+        await fetchStorageStatus();
+        alert('Restored. Gateway will restart to apply changes.');
+      } else {
+        setError(result.error || 'Restore failed');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Restore failed');
+    } finally {
+      setRestoreInProgress(null);
+    }
+  };
 
   const handleApprove = async (requestId: string) => {
     setActionInProgress(requestId);
@@ -211,7 +254,7 @@ export default function AdminPage() {
           <div className="storage-status">
             <div className="storage-info">
               <span>
-                R2 storage is configured. Your data will persist across container restarts.
+                R2 storage is configured. Backup Now saves your OpenClaw config and workspace; use Restore to pick one when you reload.
               </span>
               <span className="last-sync">
                 Last backup: {formatSyncTime(storageStatus.lastSync)}
@@ -227,6 +270,51 @@ export default function AdminPage() {
             </button>
           </div>
         </div>
+      )}
+
+      {storageStatus?.configured && (
+        <section className="devices-section restore-section">
+          <div className="section-header">
+            <h2>Restore from backup</h2>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={fetchBackups}
+              disabled={backupsLoading}
+            >
+              {backupsLoading ? <ButtonSpinner /> : null}
+              {backupsLoading ? 'Loading...' : 'Refresh'}
+            </button>
+          </div>
+          <p className="hint">
+            Restore from what OpenClaw backed up. Each backup contains your config, workspace, and
+            skills. The gateway will restart to apply changes.
+          </p>
+          {backupsLoading ? (
+            <div className="empty-state">
+              <p>Loading backups…</p>
+            </div>
+          ) : backups.length === 0 ? (
+            <div className="empty-state">
+              <p>No backups yet. Use &ldquo;Backup Now&rdquo; above to create one.</p>
+            </div>
+          ) : (
+            <div className="backups-list">
+              {backups.map((b) => (
+                <div key={b.timestamp} className="backup-card">
+                  <span className="backup-name">{b.displayName}</span>
+                  <button
+                    className="btn btn-primary btn-sm"
+                    onClick={() => handleRestore(b.timestamp)}
+                    disabled={restoreInProgress !== null}
+                  >
+                    {restoreInProgress === b.timestamp && <ButtonSpinner />}
+                    {restoreInProgress === b.timestamp ? 'Restoring...' : 'Restore'}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
       )}
 
       <section className="devices-section gateway-section">

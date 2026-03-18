@@ -10,6 +10,8 @@ export interface AccessMiddlewareOptions {
   type: 'json' | 'html';
   /** Whether to redirect to login when JWT is missing (only for 'html' type) */
   redirectOnMissing?: boolean;
+  /** Path prefixes to skip auth (e.g. /debug/oauth-codex for Codex sign-in) */
+  skipPaths?: string[];
 }
 
 /**
@@ -47,9 +49,14 @@ export function extractJWT(c: Context<AppEnv>): string | null {
  * @returns Hono middleware function
  */
 export function createAccessMiddleware(options: AccessMiddlewareOptions) {
-  const { type, redirectOnMissing = false } = options;
+  const { type, redirectOnMissing = false, skipPaths } = options;
 
   return async (c: Context<AppEnv>, next: Next) => {
+    // Skip auth for paths that need public access (e.g. Codex OAuth sign-in)
+    if (skipPaths?.some((p) => c.req.path.startsWith(p))) {
+      c.set('accessUser', { email: 'oauth-user', name: 'OAuth User' });
+      return next();
+    }
     // Skip auth in dev mode or E2E test mode
     if (isDevMode(c.env) || isE2ETestMode(c.env)) {
       c.set('accessUser', { email: 'dev@localhost', name: 'Dev User' });

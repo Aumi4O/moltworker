@@ -230,6 +230,8 @@ R2 storage uses a backup/restore approach for simplicity:
 
 Without R2 credentials, moltbot still works but uses ephemeral storage (data lost on container restart).
 
+**If "Last backup" shows old date:** The cron runs every 5 minutes only when the gateway is running. If the gateway was down, run **Restart Gateway** from Admin, wait for it to start, then click **Backup Now**. Ensure R2 secrets are set: `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `CF_ACCOUNT_ID`.
+
 ## Container Lifecycle
 
 By default, the sandbox container stays alive indefinitely (`SANDBOX_SLEEP_AFTER=never`). This is recommended because cold starts take 1-2 minutes.
@@ -322,6 +324,45 @@ npm run deploy
 | `WS /cdp/devtools/browser/{id}` | WebSocket connection for CDP commands |
 
 All endpoints require authentication via the `?secret=<CDP_SECRET>` query parameter.
+
+**Important:** The `/cdp` route bypasses Cloudflare Access and uses only `CDP_SECRET` for auth. This allows OpenClaw inside the container to connect without an Access JWT. Use a strong random secret (e.g. `openssl rand -hex 32`), not a placeholder.
+
+### Separate CDP domain (bypass Access entirely)
+
+If Cloudflare Access still intercepts `/cdp` on your main worker, deploy a **CDP-only worker** on a separate subdomain that is never protected by Access:
+
+1. Deploy the CDP worker:
+   ```bash
+   npm run deploy:cdp
+   ```
+   This creates `moltbot-cdp.<your-subdomain>.workers.dev` (e.g. `moltbot-cdp.alex-94f.workers.dev`).
+
+2. Set the CDP secret for this worker:
+   ```bash
+   npx wrangler secret put CDP_SECRET --config wrangler.cdp.jsonc
+   ```
+
+3. **Do not add** `moltbot-cdp` to any Cloudflare Access application. It stays public; auth is via `?secret=` only.
+
+4. Point OpenClaw at moltbot-cdp (either via env or manual config):
+
+   **Option A – Env var (recommended)** – Set on moltbot-sandbox:
+   ```bash
+   npx wrangler secret put OPENCLAW_CDP_URL
+   # When prompted, enter: wss://moltbot-cdp.alex-94f.workers.dev/cdp?secret=YOUR_CDP_SECRET
+   ```
+   The startup script patches `browser.profiles.default.cdpUrl` at container boot. No redeploy needed—the next cold start will pick it up.
+
+   **Option B – Manual config** – Add to `openclaw.json` inside the container or via R2 backup:
+   ```json
+   "browser": {
+     "profiles": {
+       "cloudflare": {
+         "cdpUrl": "wss://moltbot-cdp.alex-94f.workers.dev/cdp?secret=YOUR_CDP_SECRET"
+       }
+     }
+   }
+   ```
 
 ## Built-in Skills
 
