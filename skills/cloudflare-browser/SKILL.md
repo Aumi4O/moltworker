@@ -1,6 +1,6 @@
 ---
 name: cloudflare-browser
-description: Control headless Chrome via Cloudflare Browser Rendering CDP WebSocket. Use for screenshots, page navigation, scraping, and video capture when browser automation is needed in a Cloudflare Workers environment. Requires CDP_SECRET env var and cdpUrl configured in browser.profiles.
+description: Control headless Chrome via Cloudflare Browser Rendering CDP WebSocket. Use for screenshots, page navigation, scraping, and video capture when browser automation is needed in a Cloudflare Workers environment. Prefers OPENCLAW_CDP_URL (moltbot-cdp); else CDP_SECRET + WORKER_URL pointing to moltbot-cdp.
 ---
 
 # Cloudflare Browser Rendering
@@ -9,13 +9,14 @@ Control headless browsers via Cloudflare's Browser Rendering service using CDP (
 
 ## Prerequisites
 
-- `CDP_SECRET` environment variable set
-- Browser profile configured in openclaw.json with `cdpUrl` pointing to the worker endpoint:
+- **Preferred:** `OPENCLAW_CDP_URL` set to `wss://moltbot-cdp.xxx.workers.dev/cdp?secret=...` (bypasses Access)
+- **Or:** `CDP_SECRET` + `WORKER_URL` pointing to moltbot-cdp (not moltbot-sandbox)
+- Browser profile configured in openclaw.json with `cdpUrl` pointing to moltbot-cdp:
   ```json
   "browser": {
     "profiles": {
       "cloudflare": {
-        "cdpUrl": "https://your-worker.workers.dev/cdp?secret=..."
+        "cdpUrl": "wss://moltbot-cdp.xxx.workers.dev/cdp?secret=..."
       }
     }
   }
@@ -96,4 +97,4 @@ await send('Emulation.setDeviceMetricsOverride', {
 
 - **No target created**: Race condition - wait for Target.targetCreated event with timeout
 - **Commands timeout**: Worker may have cold start delay; increase timeout to 30-60s
-- **WebSocket hangs**: Verify CDP_SECRET matches worker configuration
+- **WebSocket hangs**: Use moltbot-cdp (not moltbot-sandbox). Set OPENCLAW_CDP_URL or ensure WORKER_URL points to moltbot-cdp. Run `./scripts/delete-cdp-access-app.sh` if moltbot-cdp was added to Cloudflare Access.

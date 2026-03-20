@@ -16,13 +16,18 @@
 const WebSocket = require('ws');
 
 function createClient(options = {}) {
-  const CDP_SECRET = options.secret || process.env.CDP_SECRET;
-  if (!CDP_SECRET) {
-    throw new Error('CDP_SECRET environment variable not set');
+  // Prefer OPENCLAW_CDP_URL (moltbot-cdp) when set; else WORKER_URL + CDP_SECRET
+  const raw = (options.cdpUrl || process.env.OPENCLAW_CDP_URL || '').trim();
+  let wsUrl;
+  if (/^wss?:\/\/.+/.test(raw)) {
+    wsUrl = raw;
+  } else {
+    const CDP_SECRET = options.secret || process.env.CDP_SECRET;
+    if (!CDP_SECRET) throw new Error('CDP_SECRET or OPENCLAW_CDP_URL required');
+    const workerUrl = (options.workerUrl || process.env.WORKER_URL || '').replace(/^https?:\/\//, '').trim();
+    if (!workerUrl) throw new Error('WORKER_URL or OPENCLAW_CDP_URL required (must point to moltbot-cdp, not Access-protected sandbox)');
+    wsUrl = `wss://${workerUrl}/cdp?secret=${encodeURIComponent(CDP_SECRET)}`;
   }
-  
-  const workerUrl = (options.workerUrl || process.env.WORKER_URL).replace(/^https?:\/\//, '');
-  const wsUrl = `wss://${workerUrl}/cdp?secret=${encodeURIComponent(CDP_SECRET)}`;
   const timeout = options.timeout || 60000;
   
   return new Promise((resolve, reject) => {

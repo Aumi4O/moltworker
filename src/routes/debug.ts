@@ -33,6 +33,7 @@ a:hover{background:#0f3460;}.desc{font-size:0.85rem;color:#94a3b8;margin-top:4px
 <a href="${base}/debug/version">Version<span class="desc">OpenClaw and Node versions</span></a>
 <a href="${base}/debug/env">Env<span class="desc">Environment config (sanitized)</span></a>
 <a href="${base}/debug/container-config">Container config<span class="desc">openclaw.json from container</span></a>
+<a href="${base}/debug/startup-logs">Startup logs<span class="desc">Gateway stdout/stderr (diagnose crashes)</span></a>
 <a href="${base}/debug/logs">Logs<span class="desc">Gateway process logs</span></a>
 </body></html>`;
   return c.html(html);
@@ -98,7 +99,7 @@ debug.get('/oauth-codex', async (c) => {
   </div>
   <p style="margin-top: 24px; font-size: 0.8rem; color: #64748b;">
     Connect failing? <a href="${baseUrl}/debug/oauth-codex/probe" target="_blank" style="color:#60a5fa;">Check gateway auth endpoint</a><br/>
-    Gateway hanging? <a href="${baseUrl}/_admin/" target="_blank" style="color:#60a5fa;">Restart at Admin</a> (Backup first to keep login)
+    Gateway hanging? <a href="${baseUrl}/_admin/" target="_blank" style="color:#60a5fa;">Restart gateway in Admin</a>
   </p>
 
   <script>
@@ -362,10 +363,108 @@ async function handleOauthExchange(c: Context<AppEnv>) {
   return c.json({ ok: true, success: true });
 }
 
+// GET /debug/startup-logs - Fetch latest gateway process logs (for diagnosing startup failures)
+debug.get('/startup-logs', async (c) => {
+  const sandbox = c.get('sandbox');
+  try {
+    const procs = await sandbox.listProcesses();
+    const gatewayProcs = procs.filter(
+      (p) =>
+        (p.command.includes('start-openclaw.sh') || p.command.includes('openclaw gateway')) &&
+        !p.command.includes('openclaw devices'),
+    );
+    const proc = gatewayProcs.sort((a, b) => (b.startTime?.getTime() ?? 0) - (a.startTime?.getTime() ?? 0))[0];
+    if (!proc) {
+      return c.json({ status: 'no_process', message: 'No gateway process found', stdout: '', stderr: '' });
+    }
+    const logs = await proc.getLogs?.();
+    const stdout = logs?.stdout || '';
+    const stderr = logs?.stderr || '';
+    return c.json({
+      status: 'ok',
+      processId: proc.id,
+      processStatus: proc.status,
+      stdout,
+      stderr,
+      combined: [stderr, stdout].filter(Boolean).join('\n--- stdout ---\n').slice(-5000),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Unknown error';
+    return c.json({ status: 'error', message: msg, stdout: '', stderr: '' }, 500);
+  }
+});
+
+const KILL_GATEWAY_TIMEOUT_MS = 60000;
+
+// GET /debug/kill-gateway-force - Simple page with Kill button (for when Admin won't load)
+debug.get('/kill-gateway-force', (c) => {
+  const host = c.req.header('host') || 'localhost';
+  const protocol = c.req.header('x-forwarded-proto') || 'https';
+  const base = `${protocol}://${host}`;
+  return c.html(`<!DOCTYPE html>
+<html><head><meta charset="UTF-8"/><title>Force Kill Gateway</title>
+<style>body{font-family:system-ui;max-width:400px;margin:40px auto;padding:24px;background:#1a1a2e;color:#e0e0e0;}
+.btn{background:#ef4444;color:white;border:none;padding:12px 24px;border-radius:8px;cursor:pointer;font-size:1rem;}
+.btn:hover{background:#dc2626;}
+.result{margin-top:16px;padding:12px;border-radius:8px;white-space:pre-wrap;font-size:0.9rem;}
+a{color:#60a5fa;}</style></head><body>
+<h1>Force Kill Gateway</h1>
+<p>Use when Admin/Restart won't load. Kills all OpenClaw processes.</p>
+<button class="btn" id="killBtn">Kill everything</button>
+<pre class="result" id="result"></pre>
+<p style="margin-top:24px;font-size:0.85rem;"><a href="${base}/_admin/">Admin</a> | <a href="${base}/debug/start-gateway">Start gateway (POST)</a></p>
+<script>
+document.getElementById('killBtn').onclick=async function(){
+  const r=document.getElementById('result');
+  r.textContent='Sending...';
+  try{
+    const res=await fetch('${base}/debug/kill-gateway-force',{method:'POST'});
+    const d=await res.json();
+    r.textContent=JSON.stringify(d,null,2);
+    r.style.background=d.ok?'#14532d':'#450a0a';
+  }catch(e){
+    r.textContent='Error: '+e.message;
+    r.style.background='#450a0a';
+  }
+};
+</script></body></html>`);
+});
+
+// POST /debug/kill-gateway-force - Force kill all OpenClaw/gateway processes via pkill -9
+// Use when restart/kill hangs. Kills openclaw, clawdbot, start-openclaw, start-moltbot.
+debug.post('/kill-gateway-force', async (c) => {
+  const sandbox = c.get('sandbox');
+  const killTask = (async () => {
+    const proc = await sandbox.startProcess(
+      'pkill -9 -f openclaw 2>/dev/null; pkill -9 -f clawdbot 2>/dev/null; pkill -9 -f start-openclaw 2>/dev/null; pkill -9 -f start-moltbot 2>/dev/null; true'
+    );
+    await new Promise((r) => setTimeout(r, 3000));
+    const logs = await proc.getLogs?.();
+    return { ok: true, message: 'Force kill sent. Wait ~10s then start gateway.', stdout: logs?.stdout || '', stderr: logs?.stderr || '' };
+  })();
+  const timeout = new Promise<{ ok: false; error: string }>((resolve) =>
+    setTimeout(
+      () =>
+        resolve({
+          ok: false,
+          error: 'Container did not respond in 60s. It may still be booting after a deploy — wait 1-2 minutes and try again.',
+        }),
+      KILL_GATEWAY_TIMEOUT_MS
+    )
+  );
+  try {
+    const result = await Promise.race([killTask, timeout]);
+    return c.json(result, result.ok ? 200 : 503);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Unknown error';
+    return c.json({ ok: false, error: msg }, 500);
+  }
+});
+
 // POST /debug/start-gateway - Start the gateway
 debug.post('/start-gateway', async (c) => {
   const sandbox = c.get('sandbox');
-  const { ensureMoltbotGateway, findExistingMoltbotProcess } = await import('../gateway');
+  const { ensureMoltbotGateway } = await import('../gateway');
   try {
     await ensureMoltbotGateway(sandbox, c.env);
     return c.json({ status: 'running', ok: true });
@@ -384,10 +483,12 @@ debug.post('/start-gateway', async (c) => {
         const logs = await proc.getLogs?.();
         startupLogs = [logs?.stderr, logs?.stdout].filter(Boolean).join('\n--- stdout ---\n').slice(-3000);
       }
-    } catch {
-      // ignore
+    } catch (logErr) {
+      startupLogs = `(Could not fetch logs: ${logErr instanceof Error ? logErr.message : 'unknown'})`;
     }
-    const hint = msg.includes('ANTHROPIC_API_KEY') ? 'Set CODEX_ONLY=true: wrangler secret put CODEX_ONLY' : 'Check startupLogs below for the actual error';
+    const hint = msg.includes('ANTHROPIC_API_KEY')
+      ? 'Set CODEX_ONLY=true: wrangler secret put CODEX_ONLY'
+      : 'Check startupLogs below. Or visit /debug/startup-logs for raw logs.';
     return c.json(
       { status: 'error', message: msg, hint, startupLogs: startupLogs || undefined },
       503,

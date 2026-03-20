@@ -1,35 +1,24 @@
+/**
+ * Admin UI only: gateway restart, device pairing, CDP URL patch.
+ * No R2 backup / sync / restore controls (by design; persistence is rclone in the container).
+ */
 import { useState, useEffect, useCallback } from 'react';
 import {
   listDevices,
   approveDevice,
   approveAllDevices,
   restartGateway,
-  getStorageStatus,
-  triggerSync,
-  listBackups,
-  restoreBackup,
+  patchCdpUrl,
   AuthError,
   type PendingDevice,
   type PairedDevice,
   type DeviceListResponse,
-  type StorageStatusResponse,
-  type BackupEntry,
 } from '../api';
 import './AdminPage.css';
 
 // Small inline spinner for buttons
 function ButtonSpinner() {
   return <span className="btn-spinner" />;
-}
-
-function formatSyncTime(isoString: string | null) {
-  if (!isoString) return 'Never';
-  try {
-    const date = new Date(isoString);
-    return date.toLocaleString();
-  } catch {
-    return isoString;
-  }
 }
 
 function formatTimestamp(ts: number) {
@@ -51,15 +40,12 @@ function formatTimeAgo(ts: number) {
 export default function AdminPage() {
   const [pending, setPending] = useState<PendingDevice[]>([]);
   const [paired, setPaired] = useState<PairedDevice[]>([]);
-  const [storageStatus, setStorageStatus] = useState<StorageStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionInProgress, setActionInProgress] = useState<string | null>(null);
   const [restartInProgress, setRestartInProgress] = useState(false);
-  const [syncInProgress, setSyncInProgress] = useState(false);
-  const [backups, setBackups] = useState<BackupEntry[]>([]);
-  const [backupsLoading, setBackupsLoading] = useState(false);
-  const [restoreInProgress, setRestoreInProgress] = useState<string | null>(null);
+  const [cdpUrlInput, setCdpUrlInput] = useState('');
+  const [cdpPatchInProgress, setCdpPatchInProgress] = useState(false);
 
   const fetchDevices = useCallback(async () => {
     try {
@@ -84,64 +70,15 @@ export default function AdminPage() {
     }
   }, []);
 
-  const fetchStorageStatus = useCallback(async () => {
-    try {
-      const status = await getStorageStatus();
-      setStorageStatus(status);
-    } catch (err) {
-      // Don't show error for storage status - it's not critical
-      console.error('Failed to fetch storage status:', err);
-    }
-  }, []);
-
-  const fetchBackups = useCallback(async () => {
-    if (!storageStatus?.configured) return;
-    setBackupsLoading(true);
-    try {
-      const res = await listBackups();
-      setBackups(res.backups || []);
-    } catch {
-      setBackups([]);
-    } finally {
-      setBackupsLoading(false);
-    }
-  }, [storageStatus?.configured]);
-
   useEffect(() => {
     fetchDevices();
-    fetchStorageStatus();
-  }, [fetchDevices, fetchStorageStatus]);
-
-  useEffect(() => {
-    if (storageStatus?.configured) fetchBackups();
-  }, [storageStatus?.configured, fetchBackups]);
-
-  const handleRestore = async (timestamp: string) => {
-    if (!confirm(`Restore from backup "${timestamp}"? The gateway will restart.`)) return;
-    setRestoreInProgress(timestamp);
-    try {
-      const result = await restoreBackup(timestamp);
-      if (result.success) {
-        setError(null);
-        await fetchBackups();
-        await fetchStorageStatus();
-        alert('Restored. Gateway will restart to apply changes.');
-      } else {
-        setError(result.error || 'Restore failed');
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Restore failed');
-    } finally {
-      setRestoreInProgress(null);
-    }
-  };
+  }, [fetchDevices]);
 
   const handleApprove = async (requestId: string) => {
     setActionInProgress(requestId);
     try {
       const result = await approveDevice(requestId);
       if (result.success) {
-        // Refresh the list
         await fetchDevices();
       } else {
         setError(result.error || 'Approval failed');
@@ -162,7 +99,6 @@ export default function AdminPage() {
       if (result.failed && result.failed.length > 0) {
         setError(`Failed to approve ${result.failed.length} device(s)`);
       }
-      // Refresh the list
       await fetchDevices();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to approve devices');
@@ -185,7 +121,6 @@ export default function AdminPage() {
       const result = await restartGateway();
       if (result.success) {
         setError(null);
-        // Show success message briefly
         alert('Gateway restart initiated. Clients will reconnect automatically.');
       } else {
         setError(result.error || 'Failed to restart gateway');
@@ -197,21 +132,30 @@ export default function AdminPage() {
     }
   };
 
-  const handleSync = async () => {
-    setSyncInProgress(true);
+  const handlePatchCdpUrl = async () => {
+    const url = cdpUrlInput.trim();
+    if (!url) {
+      setError('Enter the full CDP URL (wss://moltbot-cdp.../cdp?secret=...)');
+      return;
+    }
+    if (!url.startsWith('ws://') && !url.startsWith('wss://')) {
+      setError('CDP URL must start with ws:// or wss://');
+      return;
+    }
+    setCdpPatchInProgress(true);
+    setError(null);
     try {
-      const result = await triggerSync();
+      const result = await patchCdpUrl(url);
       if (result.success) {
-        // Update the storage status with new lastSync time
-        setStorageStatus((prev) => (prev ? { ...prev, lastSync: result.lastSync || null } : null));
-        setError(null);
+        setCdpUrlInput('');
+        alert(result.message || 'CDP URL patched. Restart the gateway for changes to take effect.');
       } else {
-        setError(result.error || 'Sync failed');
+        setError(result.error || 'Patch failed');
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to sync');
+      setError(err instanceof Error ? err.message : 'Failed to patch CDP URL');
     } finally {
-      setSyncInProgress(false);
+      setCdpPatchInProgress(false);
     }
   };
 
@@ -226,112 +170,51 @@ export default function AdminPage() {
         </div>
       )}
 
-      {storageStatus && !storageStatus.configured && (
-        <div className="warning-banner">
-          <div className="warning-content">
-            <strong>R2 Storage Not Configured</strong>
-            <p>
-              Paired devices and conversations will be lost when the container restarts. To enable
-              persistent storage, configure R2 credentials. See the{' '}
-              <a
-                href="https://github.com/cloudflare/moltworker"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                README
-              </a>{' '}
-              for setup instructions.
-            </p>
-            {storageStatus.missing && (
-              <p className="missing-secrets">Missing: {storageStatus.missing.join(', ')}</p>
-            )}
-          </div>
-        </div>
-      )}
+      <aside className="pairing-notice" aria-label="Device pairing instructions">
+        <h2 className="pairing-notice-title">You need to pair devices</h2>
+        <p>
+          OpenClaw will not talk to a new browser, the Control UI, or the CLI until you <strong>approve</strong>{' '}
+          it here. This is separate from Cloudflare Access.
+        </p>
+        <p className="pairing-notice-important">
+          <strong>Nothing appears under Pending until chat actually connects to the gateway.</strong> If the Control UI
+          shows &quot;invalid or missing token&quot; or stays disconnected, fix the gateway token first — no pairing
+          request is created until the WebSocket gets past auth.
+        </p>
+        <ol className="pairing-notice-steps">
+          <li>
+            Open <a href="/">Control UI (chat)</a> with a valid <code>?token=…</code> (your{' '}
+            <code>MOLTBOT_GATEWAY_TOKEN</code>) if the UI asks for it.
+          </li>
+          <li>Wait until the dashboard is trying to connect (not stuck on token/offline).</li>
+          <li>Return here, wait <strong>10–15s</strong>, click <strong>Refresh</strong> — the new client should show as{' '}
+            <strong>pending</strong>.
+          </li>
+          <li>Click <strong>Approve</strong>, then refresh chat.</li>
+        </ol>
+        <p className="pairing-notice-hint">
+          <strong>CLI vs browser:</strong> a paired <code>cli</code> device is your terminal only. Opening chat in the
+          browser creates a <em>separate</em> device — use incognito if this profile was already paired.
+        </p>
+      </aside>
 
-      {storageStatus?.configured && (
-        <div className="success-banner">
-          <div className="storage-status">
-            <div className="storage-info">
-              <span>
-                R2 storage is configured. Backup Now saves your OpenClaw config and workspace; use Restore to pick one when you reload.
-              </span>
-              <span className="last-sync">
-                Last backup: {formatSyncTime(storageStatus.lastSync)}
-              </span>
-            </div>
-            <button
-              className="btn btn-secondary btn-sm"
-              onClick={handleSync}
-              disabled={syncInProgress}
-            >
-              {syncInProgress && <ButtonSpinner />}
-              {syncInProgress ? 'Syncing...' : 'Backup Now'}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {storageStatus?.configured && (
-        <section className="devices-section restore-section">
-          <div className="section-header">
-            <h2>Restore from backup</h2>
-            <button
-              className="btn btn-secondary btn-sm"
-              onClick={fetchBackups}
-              disabled={backupsLoading}
-            >
-              {backupsLoading ? <ButtonSpinner /> : null}
-              {backupsLoading ? 'Loading...' : 'Refresh'}
-            </button>
-          </div>
-          <p className="hint">
-            Restore from what OpenClaw backed up. Each backup contains your config, workspace, and
-            skills. The gateway will restart to apply changes.
-          </p>
-          {backupsLoading ? (
-            <div className="empty-state">
-              <p>Loading backups…</p>
-            </div>
-          ) : backups.length === 0 ? (
-            <div className="empty-state">
-              <p>No backups yet. Use &ldquo;Backup Now&rdquo; above to create one.</p>
-            </div>
-          ) : (
-            <div className="backups-list">
-              {backups.map((b) => (
-                <div key={b.timestamp} className="backup-card">
-                  <span className="backup-name">{b.displayName}</span>
-                  <button
-                    className="btn btn-primary btn-sm"
-                    onClick={() => handleRestore(b.timestamp)}
-                    disabled={restoreInProgress !== null}
-                  >
-                    {restoreInProgress === b.timestamp && <ButtonSpinner />}
-                    {restoreInProgress === b.timestamp ? 'Restoring...' : 'Restore'}
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-      )}
-
+      {/* Core admin: gateway recycle + device pairing (same as upstream moltworker admin). */}
       <section className="devices-section gateway-section">
         <div className="section-header">
-          <h2>Gateway Controls</h2>
+          <h2>Gateway</h2>
           <button
             className="btn btn-danger"
             onClick={handleRestartGateway}
             disabled={restartInProgress}
+            type="button"
           >
             {restartInProgress && <ButtonSpinner />}
             {restartInProgress ? 'Restarting...' : 'Restart Gateway'}
           </button>
         </div>
         <p className="hint">
-          Restart the gateway to apply configuration changes or recover from errors. All connected
-          clients will be temporarily disconnected.
+          Stops and starts the OpenClaw gateway process in the sandbox. Use this to apply config changes,
+          recover from a stuck gateway, or clear errors. Clients disconnect briefly and should reconnect.
         </p>
       </section>
 
@@ -365,11 +248,21 @@ export default function AdminPage() {
             </div>
 
             {pending.length === 0 ? (
-              <div className="empty-state">
-                <p>No pending pairing requests</p>
-                <p className="hint">
-                  Devices will appear here when they attempt to connect without being paired.
+              <div className="empty-state empty-state-pending">
+                <p>
+                  <strong>No pending pairing requests</strong>
                 </p>
+                <p className="hint">That usually means no new client has reached the gateway yet, or it is already paired.</p>
+                <ul className="pending-troubleshoot">
+                  <li>
+                    Open <a href="/">chat</a> with a working gateway token — fix token/CORS errors first.
+                  </li>
+                  <li>Click <strong>Refresh</strong> here after 10–15s.</li>
+                  <li>
+                    Seeing a paired <strong>cli</strong> entry? Your <strong>browser</strong> is still a different
+                    client — open chat in that browser (try incognito).
+                  </li>
+                </ul>
               </div>
             ) : (
               <div className="devices-grid">
@@ -493,6 +386,34 @@ export default function AdminPage() {
           </section>
         </>
       )}
+
+      <section className="devices-section cdp-section">
+        <div className="section-header">
+          <h2>Browser automation (CDP)</h2>
+        </div>
+        <p className="hint">
+          Patch the CDP URL so OpenClaw can connect to moltbot-cdp for browser jobs. Use the full URL
+          including the secret, e.g. wss://moltbot-cdp.xxx.workers.dev/cdp?secret=...
+        </p>
+        <div className="cdp-patch-form">
+          <input
+            type="text"
+            className="cdp-url-input"
+            placeholder="wss://moltbot-cdp.xxx.workers.dev/cdp?secret=..."
+            value={cdpUrlInput}
+            onChange={(e) => setCdpUrlInput(e.target.value)}
+          />
+          <button
+            className="btn btn-primary"
+            onClick={handlePatchCdpUrl}
+            disabled={cdpPatchInProgress}
+            type="button"
+          >
+            {cdpPatchInProgress && <ButtonSpinner />}
+            {cdpPatchInProgress ? 'Patching...' : 'Patch CDP URL'}
+          </button>
+        </div>
+      </section>
     </div>
   );
 }

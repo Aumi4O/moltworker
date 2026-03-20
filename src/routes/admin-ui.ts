@@ -2,10 +2,10 @@ import { Hono } from 'hono';
 import type { AppEnv } from '../types';
 
 /**
- * Admin UI routes
- * Serves the SPA from the ASSETS binding.
+ * Admin UI routes — SPA only: device pairing, gateway restart, CDP URL patch.
+ * Do not add R2 / manual backup / restore UI here; persistence is in-container (rclone).
  *
- * Note: Static assets (/_admin/assets/*) are handled by publicRoutes.
+ * Static assets (/_admin/assets/*) are handled by publicRoutes.
  * Auth is applied centrally in index.ts before this app is mounted.
  */
 const adminUi = new Hono<AppEnv>();

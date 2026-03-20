@@ -156,6 +156,22 @@ describe('buildEnvVars', () => {
     expect(result.OPENCLAW_CDP_URL).toBe('wss://moltbot-cdp.example.com/cdp?secret=my-cdp-secret');
   });
 
+  it('passes OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS for extra Control UI origins', () => {
+    const env = createMockEnv({
+      OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS: 'https://a.example.com,https://b.example.com',
+    });
+    const result = buildEnvVars(env);
+    expect(result.OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS).toBe(
+      'https://a.example.com,https://b.example.com',
+    );
+  });
+
+  it('passes OPENCLAW_FORCE_WORKSPACE_TEMPLATES when true', () => {
+    const env = createMockEnv({ OPENCLAW_FORCE_WORKSPACE_TEMPLATES: 'true' });
+    const result = buildEnvVars(env);
+    expect(result.OPENCLAW_FORCE_WORKSPACE_TEMPLATES).toBe('true');
+  });
+
   it('combines all env vars correctly', () => {
     const env = createMockEnv({
       ANTHROPIC_API_KEY: 'sk-key',

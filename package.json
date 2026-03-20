@@ -8,6 +8,7 @@
     "build": "vite build",
     "deploy": "npm run build && wrangler deploy --containers-rollout=immediate",
     "deploy:cdp": "wrangler deploy --config wrangler.cdp.jsonc",
+    "secret:put": "wrangler secret put --config wrangler.jsonc",
     "dev": "vite dev",
     "start": "wrangler dev",
     "types": "wrangler types",
@@ -17,6 +18,8 @@
     "format": "oxfmt --write src/",
     "format:check": "oxfmt --check src/",
     "test": "vitest run",
+    "test:cdp": "node scripts/test-cdp.js",
+    "test:cdp:smoke": "node scripts/test-cdp-smoke.js",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"
   },
@@ -41,7 +44,8 @@
     "typescript": "^5.9.3",
     "vite": "^6.0.0",
     "vitest": "^4.0.18",
-    "wrangler": "^4.50.0"
+    "wrangler": "^4.50.0",
+    "ws": "^8.19.0"
   },
   "author": "",
   "license": "Apache-2.0",

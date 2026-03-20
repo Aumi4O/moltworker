@@ -39,8 +39,14 @@ MOLTBOT_GATEWAY_TOKEN=dev-token-change-in-prod
 
 # CDP (Chrome DevTools Protocol) configuration for browser automation
 # CDP_SECRET=shared-secret-for-cdp-auth
+# Public worker URL — also used so Control UI allows your browser Origin (fixes "origin not allowed")
 # WORKER_URL=https://your-worker.example.com
+# Optional extra origins for Control UI (comma-separated), e.g. custom domain
+# OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS=https://chat.example.com,https://preview-123.example.com
 
 # Point OpenClaw at dedicated CDP worker (e.g. moltbot-cdp) instead of moltbot-sandbox/cdp
 # Use same CDP_SECRET as configured on moltbot-cdp worker
 # OPENCLAW_CDP_URL=wss://moltbot-cdp.alex-94f.workers.dev/cdp?secret=YOUR_CDP_SECRET
+
+# Optional: overwrite HEARTBEAT.md/SOUL.md from image templates every boot (default: off; preserves R2 restore)
+# OPENCLAW_FORCE_WORKSPACE_TEMPLATES=true

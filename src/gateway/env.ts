@@ -52,7 +52,14 @@ export function buildEnvVars(env: MoltbotEnv): Record<string, string> {
   if (env.CF_ACCOUNT_ID) envVars.CF_ACCOUNT_ID = env.CF_ACCOUNT_ID;
   if (env.CDP_SECRET) envVars.CDP_SECRET = env.CDP_SECRET;
   if (env.WORKER_URL) envVars.WORKER_URL = env.WORKER_URL;
+  if (env.OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS) {
+    envVars.OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS = env.OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS;
+  }
   if (env.OPENCLAW_CDP_URL) envVars.OPENCLAW_CDP_URL = env.OPENCLAW_CDP_URL;
+  if (env.CDP_WORKER_URL) envVars.CDP_WORKER_URL = env.CDP_WORKER_URL;
+  if (env.OPENCLAW_FORCE_WORKSPACE_TEMPLATES === 'true') {
+    envVars.OPENCLAW_FORCE_WORKSPACE_TEMPLATES = 'true';
+  }
 
   return envVars;
 }

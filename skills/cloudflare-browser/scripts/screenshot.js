@@ -8,14 +8,21 @@ const WebSocket = require('ws');
 const fs = require('fs');
 const path = require('path');
 
-const CDP_SECRET = process.env.CDP_SECRET;
-if (!CDP_SECRET) {
-  console.error('Error: CDP_SECRET environment variable not set');
+// Prefer OPENCLAW_CDP_URL (moltbot-cdp) when set; else WORKER_URL + CDP_SECRET (must point to CDP host, not Access-protected sandbox)
+function getCdpWsUrl() {
+  const raw = (process.env.OPENCLAW_CDP_URL || '').trim();
+  if (/^wss?:\/\/.+/.test(raw)) return raw;
+  const CDP_SECRET = process.env.CDP_SECRET;
+  if (!CDP_SECRET) return null;
+  const workerUrl = (process.env.WORKER_URL || '').replace(/^https?:\/\//, '').trim();
+  if (!workerUrl) return null;
+  return `wss://${workerUrl}/cdp?secret=${encodeURIComponent(CDP_SECRET)}`;
+}
+const WS_URL = getCdpWsUrl();
+if (!WS_URL) {
+  console.error('Error: Set OPENCLAW_CDP_URL (wss://moltbot-cdp.xxx.workers.dev/cdp?secret=...) or WORKER_URL+CDP_SECRET pointing to moltbot-cdp');
   process.exit(1);
 }
-
-const WORKER_URL = process.env.WORKER_URL.replace(/^https?:\/\//, '');
-const WS_URL = `wss://${WORKER_URL}/cdp?secret=${encodeURIComponent(CDP_SECRET)}`;
 
 const url = process.argv[2];
 const output = process.argv[3] || 'screenshot.png';

@@ -1,16 +1,7 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../types';
 import { createAccessMiddleware } from '../auth';
-import {
-  ensureMoltbotGateway,
-  findExistingMoltbotProcess,
-  listBackups,
-  mountR2Storage,
-  restoreFromBackup,
-  syncToR2,
-  waitForProcess,
-} from '../gateway';
-import { R2_MOUNT_PATH } from '../config';
+import { ensureMoltbotGateway, findExistingMoltbotProcess, waitForProcess } from '../gateway';
 
 // CLI commands can take 10-15 seconds to complete due to WebSocket connection overhead
 const CLI_TIMEOUT_MS = 20000;
@@ -198,136 +189,78 @@ adminApi.post('/devices/approve-all', async (c) => {
   }
 });
 
-// GET /api/admin/storage - Get R2 storage status and last sync time
-adminApi.get('/storage', async (c) => {
-  const sandbox = c.get('sandbox');
-  const hasCredentials = !!(
-    c.env.R2_ACCESS_KEY_ID &&
-    c.env.R2_SECRET_ACCESS_KEY &&
-    c.env.CF_ACCOUNT_ID
-  );
-
-  // Check which credentials are missing
-  const missing: string[] = [];
-  if (!c.env.R2_ACCESS_KEY_ID) missing.push('R2_ACCESS_KEY_ID');
-  if (!c.env.R2_SECRET_ACCESS_KEY) missing.push('R2_SECRET_ACCESS_KEY');
-  if (!c.env.CF_ACCOUNT_ID) missing.push('CF_ACCOUNT_ID');
-
-  let lastSync: string | null = null;
-
-  // If R2 is configured, check for last sync timestamp
-  if (hasCredentials) {
-    try {
-      // Mount R2 if not already mounted
-      await mountR2Storage(sandbox, c.env);
-
-      // Check for sync marker file
-      const proc = await sandbox.startProcess(
-        `cat ${R2_MOUNT_PATH}/.last-sync 2>/dev/null || echo ""`,
-      );
-      await waitForProcess(proc, 5000);
-      const logs = await proc.getLogs();
-      const timestamp = logs.stdout?.trim();
-      if (timestamp && timestamp !== '') {
-        lastSync = timestamp;
-      }
-    } catch {
-      // Ignore errors checking sync status
-    }
-  }
-
-  return c.json({
-    configured: hasCredentials,
-    missing: missing.length > 0 ? missing : undefined,
-    lastSync,
-    message: hasCredentials
-      ? 'R2 storage is configured. Your data will persist across container restarts.'
-      : 'R2 storage is not configured. Paired devices and conversations will be lost when the container restarts.',
-  });
-});
-
-// GET /api/admin/storage/backups - List versioned backups for restore picker
-adminApi.get('/storage/backups', async (c) => {
-  const sandbox = c.get('sandbox');
-  try {
-    const result = await listBackups(sandbox, c.env);
-    return c.json(result);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : 'Unknown error';
-    return c.json({ error: msg, backups: [] }, 500);
-  }
-});
-
-// POST /api/admin/storage/restore - Restore from a specific backup
-adminApi.post('/storage/restore', async (c) => {
-  const sandbox = c.get('sandbox');
-  let body: { timestamp?: string };
+// POST /api/admin/cdp/patch - Patch CDP URL in config (Access-protected)
+adminApi.post('/cdp/patch', async (c) => {
+  let body: { cdpUrl?: string };
   try {
     body = await c.req.json();
   } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
+    return c.json(
+      {
+        success: false,
+        error: 'Invalid JSON. Send: {"cdpUrl":"wss://moltbot-cdp.../cdp?secret=FULL_SECRET"}',
+      },
+      400,
+    );
   }
-  const timestamp = body?.timestamp?.trim();
-  if (!timestamp) {
-    return c.json({ error: 'timestamp is required' }, 400);
+  const cdpUrl = (body.cdpUrl || '').trim();
+  if (!/^wss?:\/\/.+/.test(cdpUrl)) {
+    return c.json(
+      {
+        success: false,
+        error: 'Invalid cdpUrl',
+        hint: 'Must be ws:// or wss:// URL with full secret, e.g. wss://moltbot-cdp.example.workers.dev/cdp?secret=YOUR_FULL_SECRET',
+      },
+      400,
+    );
   }
+  const sandbox = c.get('sandbox');
+  const patchScript = `
+const fs=require('fs');
+const p='/root/.openclaw/openclaw.json';
+const cdpUrl=process.env.PATCH_CDP_URL||'';
+const validColor='3498db';
+if(!/^wss?:\\/\\/.+/.test(cdpUrl)){console.error('invalid');process.exit(1);}
+let c={};try{c=JSON.parse(fs.readFileSync(p,'utf8'));}catch(e){}
+c.browser=c.browser||{};c.browser.profiles=c.browser.profiles||{};
+const prof={cdpUrl,color:validColor};
+c.browser.profiles.default=prof;c.browser.profiles.cloudflare=prof;
+fs.writeFileSync(p,JSON.stringify(c,null,2));
+console.log('patched');
+`
+    .replace(/\n\s*/g, ' ')
+    .trim();
   try {
-    const result = await restoreFromBackup(sandbox, c.env, timestamp);
-    if (result.success) {
-      // Restart gateway so it picks up the restored config
-      try {
-        const existing = await findExistingMoltbotProcess(sandbox);
-        if (existing) await existing.kill();
-        await ensureMoltbotGateway(sandbox, c.env);
-      } catch {
-        // Restart best-effort; restore succeeded
-      }
+    const proc = await sandbox.startProcess(`node -e "${patchScript.replace(/"/g, '\\"')}"`, {
+      env: { PATCH_CDP_URL: cdpUrl },
+    });
+    const deadline = Date.now() + 5000;
+    let logs: { stdout?: string; stderr?: string } | undefined;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 200));
+      logs = await proc.getLogs?.();
+      if ((logs?.stdout || '').includes('patched')) break;
+      if (proc.status !== 'running') break;
     }
-    return c.json(result);
+    logs = logs ?? (await proc.getLogs?.());
+    if ((logs?.stdout || '').includes('patched')) {
+      return c.json({
+        success: true,
+        message: 'CDP URL patched. Restart the gateway for changes to take effect.',
+      });
+    }
+    return c.json(
+      {
+        success: false,
+        error: 'Patch may have failed',
+        stdout: logs?.stdout || '',
+        stderr: logs?.stderr || '',
+      },
+      500,
+    );
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
     return c.json({ success: false, error: msg }, 500);
-  }
-});
-
-// POST /api/admin/storage/sync - Trigger a manual sync to R2
-adminApi.post('/storage/sync', async (c) => {
-  const sandbox = c.get('sandbox');
-
-  // Config is created by start-openclaw.sh when gateway starts. Ensure gateway
-  // has run at least once so config exists (restore from R2 or onboard).
-  try {
-    await ensureMoltbotGateway(sandbox, c.env);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : 'Unknown error';
-    return c.json(
-      {
-        success: false,
-        error: 'Gateway must start before backup',
-        details: `Config is created when the gateway starts. Gateway failed: ${msg}`,
-      },
-      503,
-    );
-  }
-
-  const result = await syncToR2(sandbox, c.env);
-
-  if (result.success) {
-    return c.json({
-      success: true,
-      message: 'Sync completed successfully',
-      lastSync: result.lastSync,
-    });
-  } else {
-    const status = result.error?.includes('not configured') ? 400 : 500;
-    return c.json(
-      {
-        success: false,
-        error: result.error,
-        details: result.details,
-      },
-      status,
-    );
   }
 });
 

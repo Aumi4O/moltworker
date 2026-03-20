@@ -26,7 +26,7 @@ import { getSandbox, Sandbox, type SandboxOptions } from '@cloudflare/sandbox';
 import type { AppEnv, MoltbotEnv } from './types';
 import { MOLTBOT_PORT } from './config';
 import { createAccessMiddleware } from './auth';
-import { ensureMoltbotGateway, findExistingMoltbotProcess, syncToR2 } from './gateway';
+import { ensureMoltbotGateway, findExistingMoltbotProcess } from './gateway';
 import { publicRoutes, api, adminUi, debug, cdp } from './routes';
 import { redactSensitiveParams } from './utils/logging';
 import loadingPageHtml from './assets/loading.html';
@@ -83,9 +83,15 @@ function validateRequiredEnv(env: MoltbotEnv): string[] {
   const hasAnthropicKey = !!env.ANTHROPIC_API_KEY;
   const hasOpenAIKey = !!env.OPENAI_API_KEY;
 
-  if (!isCodexOnly && !hasCloudflareGateway && !hasLegacyGateway && !hasAnthropicKey && !hasOpenAIKey) {
+  if (
+    !isCodexOnly &&
+    !hasCloudflareGateway &&
+    !hasLegacyGateway &&
+    !hasAnthropicKey &&
+    !hasOpenAIKey
+  ) {
     missing.push(
-      'ANTHROPIC_API_KEY, OPENAI_API_KEY, CODEX_ONLY=true, or CLOUDFLARE_AI_GATEWAY_*',
+      'ANTHROPIC_API_KEY, OPENAI_API_KEY, CODEX_ONLY=true, or CLOUDFLARE_AI_GATEWAY_API_KEY + CF_AI_GATEWAY_ACCOUNT_ID + CF_AI_GATEWAY_GATEWAY_ID',
     );
   }
 
@@ -199,17 +205,15 @@ app.use('*', async (c, next) => {
 // Middleware: Cloudflare Access authentication for protected routes
 app.use('*', async (c, next) => {
   const path = c.req.path;
-  // Skip Access for paths that use their own auth (CDP uses CDP_SECRET, OAuth has its own flow)
-  const skipPaths = ['/debug/oauth-codex', '/debug/start-gateway', '/cdp'];
+  const skipPaths = ['/debug/oauth-codex', '/debug/start-gateway', '/debug/kill-gateway-force', '/debug/startup-logs', '/cdp'];
   if (skipPaths.some((p) => path === p || path.startsWith(p + '/'))) {
     return next();
   }
-  // Determine response type based on Accept header
   const acceptsHtml = c.req.header('Accept')?.includes('text/html');
   const middleware = createAccessMiddleware({
     type: acceptsHtml ? 'html' : 'json',
     redirectOnMissing: acceptsHtml,
-    skipPaths: ['/debug/oauth-codex', '/debug/start-gateway'],
+    skipPaths: ['/debug/oauth-codex', '/debug/start-gateway', '/debug/kill-gateway-force', '/debug/startup-logs'],
   });
 
   return middleware(c, next);
@@ -221,11 +225,14 @@ app.route('/api', api);
 // Mount Admin UI routes (protected by Cloudflare Access)
 app.route('/_admin', adminUi);
 
-// Mount debug routes - OAuth/start-gateway always enabled for Codex; others require DEBUG_ROUTES
+// Mount debug routes — Codex OAuth / gateway helpers stay reachable without DEBUG_ROUTES
 app.use('/debug/*', async (c, next) => {
   const path = c.req.path;
   const isOAuthOrStart =
-    path.startsWith('/debug/oauth-codex') || path === '/debug/start-gateway';
+    path.startsWith('/debug/oauth-codex') ||
+    path === '/debug/start-gateway' ||
+    path === '/debug/kill-gateway-force' ||
+    path === '/debug/startup-logs';
   if (!isOAuthOrStart && c.env.DEBUG_ROUTES !== 'true') {
     return c.json({ error: 'Debug routes are disabled. Set DEBUG_ROUTES=true to enable.' }, 404);
   }
@@ -301,11 +308,14 @@ app.all('*', async (c) => {
       console.log('[WS] URL:', url.pathname + redactedSearch);
     }
 
-    // Inject gateway token into WebSocket request if not already present.
+    // Inject gateway token into WebSocket request when the client sends none.
     // CF Access redirects strip query params, so authenticated users lose ?token=.
-    // Since the user already passed CF Access auth, we inject the token server-side.
+    // SPAs often add ?token= (empty); searchParams.has('token') is true but value is blank — inject then too.
     let wsRequest = request;
-    if (c.env.MOLTBOT_GATEWAY_TOKEN && !url.searchParams.has('token')) {
+    const tokenFromClient = url.searchParams.get('token');
+    const clientTokenMissingOrBlank =
+      tokenFromClient === null || tokenFromClient.trim() === '';
+    if (c.env.MOLTBOT_GATEWAY_TOKEN && clientTokenMissingOrBlank) {
       const tokenUrl = new URL(url.toString());
       tokenUrl.searchParams.set('token', c.env.MOLTBOT_GATEWAY_TOKEN);
       wsRequest = new Request(tokenUrl.toString(), request);
@@ -440,16 +450,8 @@ app.all('*', async (c) => {
     });
   }
 
-  // Inject gateway token for HTTP if not present (same as WebSocket)
-  let httpRequest = request;
-  if (c.env.MOLTBOT_GATEWAY_TOKEN && !url.searchParams.has('token')) {
-    const tokenUrl = new URL(url.toString());
-    tokenUrl.searchParams.set('token', c.env.MOLTBOT_GATEWAY_TOKEN);
-    httpRequest = new Request(tokenUrl.toString(), request);
-  }
-
   console.log('[HTTP] Proxying:', url.pathname + url.search);
-  const httpResponse = await sandbox.containerFetch(httpRequest, MOLTBOT_PORT);
+  const httpResponse = await sandbox.containerFetch(request, MOLTBOT_PORT);
   console.log('[HTTP] Response status:', httpResponse.status);
 
   // Add debug header to verify worker handled the request
@@ -464,35 +466,6 @@ app.all('*', async (c) => {
   });
 });
 
-/**
- * Scheduled handler for cron triggers.
- * Syncs moltbot config/state from container to R2 for persistence.
- */
-async function scheduled(
-  _event: ScheduledEvent,
-  env: MoltbotEnv,
-  _ctx: ExecutionContext,
-): Promise<void> {
-  const options = buildSandboxOptions(env);
-  const sandbox = getSandbox(env.Sandbox, 'moltbot', options);
-
-  const gatewayProcess = await findExistingMoltbotProcess(sandbox);
-  if (!gatewayProcess) {
-    console.log('[cron] Gateway not running yet, skipping sync');
-    return;
-  }
-
-  console.log('[cron] Starting backup sync to R2...');
-  const result = await syncToR2(sandbox, env);
-
-  if (result.success) {
-    console.log('[cron] Backup sync completed successfully at', result.lastSync);
-  } else {
-    console.error('[cron] Backup sync failed:', result.error, result.details || '');
-  }
-}
-
 export default {
   fetch: app.fetch,
-  scheduled,
 };

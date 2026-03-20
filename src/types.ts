@@ -42,9 +42,15 @@ export interface MoltbotEnv {
   // Browser Rendering binding for CDP shim
   BROWSER?: Fetcher;
   CDP_SECRET?: string; // Shared secret for CDP endpoint authentication
-  WORKER_URL?: string; // Public URL of the worker (for CDP endpoint)
+  WORKER_URL?: string; // Public URL of the worker (CDP + Control UI allowedOrigins); e.g. https://moltbot-sandbox.xxx.workers.dev
+  /** Comma-separated extra Control UI origins (optional; WORKER_URL is added automatically in container) */
+  OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS?: string;
   /** Full CDP WebSocket URL for OpenClaw browser profiles (e.g. wss://moltbot-cdp.../cdp?secret=...) */
   OPENCLAW_CDP_URL?: string;
+  /** CDP worker base URL (e.g. wss://moltbot-cdp.xxx.workers.dev/cdp). Built with CDP_SECRET to avoid truncation. */
+  CDP_WORKER_URL?: string;
+  /** 'true' = start-openclaw.sh overwrites all workspace .md templates from image (disables restore-friendly defaults) */
+  OPENCLAW_FORCE_WORKSPACE_TEMPLATES?: string;
 }
 
 /**

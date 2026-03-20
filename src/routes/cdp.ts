@@ -30,6 +30,7 @@ interface CDPRequest {
   id: number;
   method: string;
   params?: Record<string, unknown>;
+  sessionId?: string;
 }
 
 interface CDPResponse {
@@ -49,6 +50,9 @@ interface CDPEvent {
 interface CDPSession {
   browser: Browser;
   pages: Map<string, Page>; // targetId -> Page
+  sessionToTarget: Map<string, string>; // sessionId -> targetId (for flatten mode)
+  targetToSession: Map<string, string>; // targetId -> sessionId (reverse lookup)
+  autoAttachEnabled: boolean;
   defaultTargetId: string;
   nodeIdCounter: number;
   nodeMap: Map<number, string>; // nodeId -> selector path
@@ -75,12 +79,21 @@ cdp.get('/', async (c) => {
       supported_methods: [
         // Browser
         'Browser.getVersion',
+        'Browser.getWindowForTarget',
+        'Browser.setDownloadBehavior',
         'Browser.close',
         // Target
+        'Target.setDiscoverTargets',
+        'Target.setAutoAttach',
+        'Target.getTargetInfo',
         'Target.createTarget',
         'Target.closeTarget',
         'Target.getTargets',
         'Target.attachToTarget',
+        'Target.detachFromTarget',
+        'Target.activateTarget',
+        'Target.createBrowserContext',
+        'Target.disposeBrowserContext',
         // Page
         'Page.navigate',
         'Page.reload',
@@ -361,12 +374,67 @@ cdp.get('/json', async (c) => {
 
 /**
  * Initialize a CDP session for a WebSocket connection
+ *
+ * Message handler is attached BEFORE browser launch so early messages (e.g. Browser.getVersion
+ * sent on open) are not lost. Messages are queued until session is ready.
  */
 async function initCDPSession(ws: WebSocket, env: MoltbotEnv): Promise<void> {
   let session: CDPSession | null = null;
+  const messageQueue: string[] = [];
+
+  const processMessage = async (raw: string) => {
+    if (!session) return;
+
+    let request: CDPRequest;
+    try {
+      request = JSON.parse(raw);
+    } catch {
+      console.error('[CDP] Invalid JSON received');
+      return;
+    }
+
+    if (request.id === undefined || request.method === undefined) return;
+
+    console.log('[CDP] →', request.method, 'id:', request.id, request.sessionId ? 'session:' + request.sessionId : '');
+
+    try {
+      const result = await handleCDPMethod(session, request.method, request.params || {}, ws, request.sessionId);
+      console.log('[CDP] ✓', request.method, 'id:', request.id);
+      sendResponse(ws, request.id, result);
+    } catch (err) {
+      console.error('[CDP] ✗', request.method, 'id:', request.id, err instanceof Error ? err.message : err);
+      sendError(ws, request.id, -32000, err instanceof Error ? err.message : 'Unknown error');
+    }
+  };
+
+  // Attach message handler BEFORE browser launch so early messages (e.g. Browser.getVersion) are not lost
+  ws.addEventListener('message', async (event) => {
+    const raw = event.data as string;
+    if (session) {
+      await processMessage(raw);
+    } else {
+      messageQueue.push(raw);
+    }
+  });
+
+  ws.addEventListener('close', async (event) => {
+    const ce = event as CloseEvent;
+    console.log('[CDP] WebSocket closed, code:', ce.code, 'reason:', ce.reason);
+    if (session) {
+      try {
+        await session.browser.close();
+      } catch (err) {
+        console.error('[CDP] Error closing browser:', err);
+      }
+    }
+  });
+
+  ws.addEventListener('error', (event) => {
+    console.error('[CDP] WebSocket error:', event);
+  });
 
   try {
-    // Launch browser
+    // Launch browser (can take 5–15s on cold start)
     // eslint-disable-next-line import/no-named-as-default-member -- puppeteer.launch() is the standard API
     const browser = await puppeteer.launch(env.BROWSER!);
     const page = await browser.newPage();
@@ -375,6 +443,9 @@ async function initCDPSession(ws: WebSocket, env: MoltbotEnv): Promise<void> {
     session = {
       browser,
       pages: new Map([[targetId, page]]),
+      sessionToTarget: new Map(),
+      targetToSession: new Map(),
+      autoAttachEnabled: false,
       defaultTargetId: targetId,
       nodeIdCounter: 1,
       nodeMap: new Map(),
@@ -398,50 +469,15 @@ async function initCDPSession(ws: WebSocket, env: MoltbotEnv): Promise<void> {
     });
 
     console.log('[CDP] Session initialized, targetId:', targetId);
+
+    // Process any messages that arrived while browser was launching
+    for (const raw of messageQueue) {
+      await processMessage(raw);
+    }
   } catch (err) {
     console.error('[CDP] Browser launch failed:', err);
     ws.close(1011, 'Browser launch failed');
-    return;
   }
-
-  // Handle incoming messages
-  ws.addEventListener('message', async (event) => {
-    if (!session) return;
-
-    let request: CDPRequest;
-    try {
-      request = JSON.parse(event.data as string);
-    } catch {
-      console.error('[CDP] Invalid JSON received');
-      return;
-    }
-
-    console.log('[CDP] Request:', request.method, request.params);
-
-    try {
-      const result = await handleCDPMethod(session, request.method, request.params || {}, ws);
-      sendResponse(ws, request.id, result);
-    } catch (err) {
-      console.error('[CDP] Method error:', request.method, err);
-      sendError(ws, request.id, -32000, err instanceof Error ? err.message : 'Unknown error');
-    }
-  });
-
-  // Handle close
-  ws.addEventListener('close', async () => {
-    console.log('[CDP] WebSocket closed, cleaning up');
-    if (session) {
-      try {
-        await session.browser.close();
-      } catch (err) {
-        console.error('[CDP] Error closing browser:', err);
-      }
-    }
-  });
-
-  ws.addEventListener('error', (event) => {
-    console.error('[CDP] WebSocket error:', event);
-  });
 }
 
 /**
@@ -452,11 +488,19 @@ async function handleCDPMethod(
   method: string,
   params: Record<string, unknown>,
   ws: WebSocket,
+  messageSessionId?: string,
 ): Promise<unknown> {
   const [domain, command] = method.split('.');
 
-  // Get the current page (use targetId from params or default)
-  const targetId = (params.targetId as string) || session.defaultTargetId;
+  // Resolve targetId: top-level sessionId (flatten mode) → params.targetId → default
+  let targetId: string;
+  if (messageSessionId && session.sessionToTarget.has(messageSessionId)) {
+    targetId = session.sessionToTarget.get(messageSessionId)!;
+  } else if (messageSessionId && session.pages.has(messageSessionId)) {
+    targetId = messageSessionId;
+  } else {
+    targetId = (params.targetId as string) || session.defaultTargetId;
+  }
   const page = session.pages.get(targetId);
 
   switch (domain) {
@@ -516,6 +560,16 @@ async function handleBrowser(
         jsVersion: 'V8',
       };
 
+    case 'getWindowForTarget': {
+      const tid = (_params.targetId as string) || session.defaultTargetId;
+      return { windowId: 1 };
+    }
+
+    case 'setDownloadBehavior':
+      // behavior: allow | deny | default; downloadPath?: string
+      // No-op in sandbox: we acknowledge the request but don't persist downloads
+      return {};
+
     case 'close':
       await session.browser.close();
       return {};
@@ -535,27 +589,100 @@ async function handleTarget(
   ws: WebSocket,
 ): Promise<unknown> {
   switch (command) {
+    case 'setAutoAttach': {
+      session.autoAttachEnabled = !!(params.autoAttach);
+      console.log('[CDP] setAutoAttach:', session.autoAttachEnabled);
+
+      // Auto-attach to all existing targets that aren't already attached
+      if (session.autoAttachEnabled) {
+        for (const [tid, p] of session.pages) {
+          if (!session.targetToSession.has(tid)) {
+            const sid = `session-${crypto.randomUUID()}`;
+            session.sessionToTarget.set(sid, tid);
+            session.targetToSession.set(tid, sid);
+            console.log('[CDP] auto-attaching existing target:', tid, '→', sid);
+
+            sendEvent(ws, 'Target.attachedToTarget', {
+              sessionId: sid,
+              targetInfo: {
+                targetId: tid,
+                type: 'page',
+                title: '',
+                url: p.url(),
+                attached: true,
+              },
+              waitingForDebugger: false,
+            });
+          }
+        }
+      }
+      return {};
+    }
+
+    case 'setDiscoverTargets':
+      // Enable target discovery. We already have targets; no-op.
+      return {};
+
     case 'createTarget': {
       const url = (params.url as string) || 'about:blank';
-      const page = await session.browser.newPage();
-      const targetId = crypto.randomUUID();
+      console.log('[CDP] createTarget url:', url, 'existing pages:', session.pages.size);
 
-      session.pages.set(targetId, page);
+      let page: Page;
+      let targetId: string;
 
-      if (url !== 'about:blank') {
-        await page.goto(url);
+      try {
+        page = await session.browser.newPage();
+        targetId = crypto.randomUUID();
+        session.pages.set(targetId, page);
+        console.log('[CDP] createTarget: browser.newPage() ok, targetId:', targetId);
+      } catch (newPageErr) {
+        // Cloudflare Browser Rendering may limit pages per session.
+        // Reuse the default page under its real targetId.
+        console.warn('[CDP] createTarget: newPage() failed, reusing default:', newPageErr instanceof Error ? newPageErr.message : newPageErr);
+        targetId = session.defaultTargetId;
+        page = session.pages.get(targetId)!;
       }
 
+      // Navigate if URL given, but don't let navigation failure kill the connection
+      if (url && url !== 'about:blank') {
+        page.goto(url).catch((err) => {
+          console.warn('[CDP] createTarget: background goto failed:', err instanceof Error ? err.message : err);
+        });
+      }
+
+      // 1) Target.targetCreated event
       sendEvent(ws, 'Target.targetCreated', {
         targetInfo: {
           targetId,
           type: 'page',
-          title: await page.title(),
-          url: page.url(),
-          attached: true,
+          title: '',
+          url: url || 'about:blank',
+          attached: session.autoAttachEnabled,
         },
       });
 
+      // 2) If auto-attach is enabled, immediately attach and send the event
+      //    Playwright relies on this to initialize its internal Page object.
+      if (session.autoAttachEnabled && !session.targetToSession.has(targetId)) {
+        const sid = `session-${crypto.randomUUID()}`;
+        session.sessionToTarget.set(sid, targetId);
+        session.targetToSession.set(targetId, sid);
+        console.log('[CDP] createTarget: auto-attaching:', targetId, '→', sid);
+
+        sendEvent(ws, 'Target.attachedToTarget', {
+          sessionId: sid,
+          targetInfo: {
+            targetId,
+            type: 'page',
+            title: '',
+            url: url || 'about:blank',
+            attached: true,
+          },
+          waitingForDebugger: false,
+        });
+      }
+
+      console.log('[CDP] createTarget: done, targetId:', targetId);
       return { targetId };
     }
 
@@ -567,8 +694,13 @@ async function handleTarget(
         throw new Error(`Target not found: ${targetId}`);
       }
 
-      await page.close();
       session.pages.delete(targetId);
+
+      // Only close the actual page if it's not the last remaining page
+      // (closing the last page would kill the browser session)
+      if (session.pages.size > 0 && targetId !== session.defaultTargetId) {
+        try { await page.close(); } catch { /* may already be closed */ }
+      }
 
       sendEvent(ws, 'Target.targetDestroyed', { targetId });
 
@@ -576,23 +708,87 @@ async function handleTarget(
     }
 
     case 'getTargets': {
+      const attachedTargets = new Set(session.sessionToTarget.values());
       const targets = [];
       for (const [targetId, page] of session.pages) {
+        let title = '';
+        // eslint-disable-next-line no-await-in-loop -- sequential page info retrieval
+        try { title = await page.title(); } catch { /* page may be navigating */ }
         targets.push({
           targetId,
           type: 'page',
-          // eslint-disable-next-line no-await-in-loop -- sequential page info retrieval
-          title: await page.title(),
+          title,
           url: page.url(),
-          attached: true,
+          attached: attachedTargets.has(targetId),
         });
       }
       return { targetInfos: targets };
     }
 
-    case 'attachToTarget':
-      // Already attached
-      return { sessionId: params.targetId };
+    case 'getTargetInfo': {
+      const tid = (params.targetId as string) || session.defaultTargetId;
+      const page = session.pages.get(tid);
+      if (!page) throw new Error(`Target not found: ${tid}`);
+      let title = '';
+      try { title = await page.title(); } catch { /* page may be navigating */ }
+      const attachedTargets = new Set(session.sessionToTarget.values());
+      return {
+        targetInfo: {
+          targetId: tid,
+          type: 'page',
+          title,
+          url: page.url(),
+          attached: attachedTargets.has(tid),
+        },
+      };
+    }
+
+    case 'attachToTarget': {
+      const tid = params.targetId as string;
+      if (!tid || !session.pages.has(tid)) {
+        throw new Error(`Target not found: ${tid}`);
+      }
+
+      // Reuse existing session if already attached (e.g. via auto-attach)
+      let sessionId = session.targetToSession.get(tid);
+      if (!sessionId) {
+        sessionId = `session-${crypto.randomUUID()}`;
+        session.sessionToTarget.set(sessionId, tid);
+        session.targetToSession.set(tid, sessionId);
+
+        sendEvent(ws, 'Target.attachedToTarget', {
+          sessionId,
+          targetInfo: {
+            targetId: tid,
+            type: 'page',
+            title: '',
+            url: session.pages.get(tid)!.url(),
+            attached: true,
+          },
+          waitingForDebugger: false,
+        });
+      }
+
+      console.log('[CDP] attachToTarget: targetId:', tid, '→ sessionId:', sessionId);
+      return { sessionId };
+    }
+
+    case 'detachFromTarget':
+      // No-op; we don't track detach state
+      return {};
+
+    case 'activateTarget': {
+      const tid = params.targetId as string;
+      const p = session.pages.get(tid);
+      if (p) await p.bringToFront();
+      return {};
+    }
+
+    case 'createBrowserContext':
+      return { browserContextId: `context-${crypto.randomUUID()}` };
+
+    case 'disposeBrowserContext':
+      return {};
 
     default:
       throw new Error(`Unknown Target method: ${command}`);

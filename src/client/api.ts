@@ -1,5 +1,6 @@
-// API client for admin endpoints
-// Authentication is handled by Cloudflare Access (JWT in cookies)
+// API client for admin endpoints (devices, gateway restart, CDP patch only).
+// No storage/backup APIs — do not reintroduce them here.
+// Authentication is handled by Cloudflare Access (JWT in cookies).
 
 const API_BASE = '/api/admin';
 
@@ -113,54 +114,15 @@ export async function restartGateway(): Promise<RestartGatewayResponse> {
   });
 }
 
-export interface StorageStatusResponse {
-  configured: boolean;
-  missing?: string[];
-  lastSync: string | null;
-  message: string;
-}
-
-export async function getStorageStatus(): Promise<StorageStatusResponse> {
-  return apiRequest<StorageStatusResponse>('/storage');
-}
-
-export interface SyncResponse {
+export interface PatchCdpUrlResponse {
   success: boolean;
   message?: string;
-  lastSync?: string;
   error?: string;
-  details?: string;
 }
 
-export async function triggerSync(): Promise<SyncResponse> {
-  return apiRequest<SyncResponse>('/storage/sync', {
+export async function patchCdpUrl(cdpUrl: string): Promise<PatchCdpUrlResponse> {
+  return apiRequest<PatchCdpUrlResponse>('/cdp/patch', {
     method: 'POST',
-  });
-}
-
-export interface BackupEntry {
-  timestamp: string;
-  displayName: string;
-}
-
-export interface ListBackupsResponse {
-  backups: BackupEntry[];
-  error?: string;
-}
-
-export async function listBackups(): Promise<ListBackupsResponse> {
-  return apiRequest<ListBackupsResponse>('/storage/backups');
-}
-
-export interface RestoreResponse {
-  success: boolean;
-  error?: string;
-  details?: string;
-}
-
-export async function restoreBackup(timestamp: string): Promise<RestoreResponse> {
-  return apiRequest<RestoreResponse>('/storage/restore', {
-    method: 'POST',
-    body: JSON.stringify({ timestamp }),
+    body: JSON.stringify({ cdpUrl }),
   });
 }

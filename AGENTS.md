@@ -27,7 +27,7 @@ src/
 │   ├── process.ts    # Process lifecycle (find, start)
 │   ├── env.ts        # Environment variable building
 │   ├── r2.ts         # R2 bucket mounting
-│   ├── sync.ts       # R2 backup sync logic
+│   ├── sync.ts       # rclone sync helper (not exposed from admin UI)
 │   └── utils.ts      # Shared utilities (waitForProcess)
 ├── routes/           # API route handlers
 │   ├── api.ts        # /api/* endpoints (devices, gateway)
@@ -86,7 +86,8 @@ Current test coverage:
 - `gateway/env.test.ts` - Environment variable building
 - `gateway/process.test.ts` - Process finding logic
 - `gateway/r2.test.ts` - R2 mounting logic
-- `gateway/sync.test.ts` - R2 backup sync logic
+- `gateway/sync.test.ts` - rclone-based container→R2 sync helper (`syncToR2`, not exposed via admin API)
+- `worker-state.test.ts` - Worker R2 metadata blob (`moltworker/worker-runtime-state.json`)
 
 When adding new functionality, add corresponding tests.
 
@@ -177,7 +178,7 @@ OpenClaw configuration is built at container startup:
 
 1. R2 backup is restored if available (with migration from legacy `.clawdbot` paths)
 2. If no config exists, `openclaw onboard --non-interactive` creates one based on env vars
-3. `start-openclaw.sh` patches the config for channels, gateway auth, and trusted proxies
+3. `start-openclaw.sh` patches the config for channels, gateway auth, trusted proxies, and **Control UI** `allowedOrigins` (from `WORKER_URL` / `OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS`)
 4. Gateway starts with `openclaw gateway --allow-unconfigured --bind lan`
 
 ### AI Provider Priority
@@ -227,6 +228,8 @@ See [OpenClaw docs](https://docs.openclaw.ai/) for full schema.
 3. Update client API in `src/client/api.ts` if frontend needs it
 4. Add tests
 
+**Admin UI scope:** Do not add R2 backup / manual sync / restore endpoints or admin-panel UI for them. Persistence is handled in the container (`start-openclaw.sh` + rclone), not from `/_admin/`.
+
 ### Adding a New Environment Variable
 
 1. Add to `MoltbotEnv` interface in `src/types.ts`
@@ -248,14 +251,8 @@ Enable debug routes with `DEBUG_ROUTES=true` and check `/debug/processes`.
 
 ## R2 Storage Notes
 
-R2 is mounted via s3fs at `/data/moltbot`. Important gotchas:
+OpenClaw data is synced with **rclone** from inside the container (`start-openclaw.sh`: restore on boot + background loop when files change). The Worker configures rclone via `ensureRcloneConfig()` in `src/gateway/r2.ts`.
 
-- **rsync compatibility**: Use `rsync -r --no-times` instead of `rsync -a`. s3fs doesn't support setting timestamps, which causes rsync to fail with "Input/output error".
+- **Worker-owned state**: Small metadata JSON at `moltworker/worker-runtime-state.json` in the same R2 bucket (updated each request via `waitUntil` in `src/worker-state.ts`). This is separate from `openclaw/`, `workspace/`, and `skills/` prefixes.
 
-- **Mount checking**: Don't rely on `sandbox.mountBucket()` error messages to detect "already mounted" state. Instead, check `mount | grep s3fs` to verify the mount status.
-
-- **Never delete R2 data**: The mount directory `/data/moltbot` IS the R2 bucket. Running `rm -rf /data/moltbot/*` will DELETE your backup data. Always check mount status before any destructive operations.
-
-- **Process status**: The sandbox API's `proc.status` may not update immediately after a process completes. Instead of checking `proc.status === 'completed'`, verify success by checking for expected output (e.g., timestamp file exists after sync).
-
-- **R2 prefix migration**: Backups are now stored under `openclaw/` prefix in R2 (was `clawdbot/`). The startup script handles restoring from both old and new prefixes with automatic migration.
+- **R2 prefix migration**: Data lives under `openclaw/` in R2 (legacy `clawdbot/` supported). The startup script restores from either prefix.

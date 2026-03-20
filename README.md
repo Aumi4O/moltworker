@@ -214,23 +214,18 @@ To find your Account ID: Go to the [Cloudflare Dashboard](https://dash.cloudflar
 
 ### How It Works
 
-R2 storage uses a backup/restore approach for simplicity:
+R2 storage uses **rclone** inside the container (see `start-openclaw.sh`):
 
 **On container startup:**
-- If R2 is mounted and contains backup data, it's restored to the moltbot config directory
-- OpenClaw uses its default paths (no special configuration needed)
+- If R2 credentials are set, data is restored from the bucket into the OpenClaw config/workspace paths
 
 **During operation:**
-- A cron job runs every 5 minutes to sync the moltbot config to R2
-- You can also trigger a manual backup from the admin UI at `/_admin/`
+- A **background sync loop** uploads changes to R2 periodically when files under the config/workspace change (no Worker cron and no admin “backup” button)
 
-**In the admin UI:**
-- When R2 is configured, you'll see "Last backup: [timestamp]"
-- Click "Backup Now" to trigger an immediate sync
+**Worker metadata (separate from OpenClaw data):**
+- The Worker stores a small JSON object at `moltworker/worker-runtime-state.json` in the same bucket (request timestamps / counters) and does not replace OpenClaw’s synced paths
 
 Without R2 credentials, moltbot still works but uses ephemeral storage (data lost on container restart).
-
-**If "Last backup" shows old date:** The cron runs every 5 minutes only when the gateway is running. If the gateway was down, run **Restart Gateway** from Admin, wait for it to start, then click **Backup Now**. Ensure R2 secrets are set: `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `CF_ACCOUNT_ID`.
 
 ## Container Lifecycle
 
@@ -250,9 +245,11 @@ When the container sleeps, the next request will trigger a cold start. If you ha
 ![admin ui](./assets/adminui.png)
 
 Access the admin UI at `/_admin/` to:
-- **R2 Storage Status** - Shows if R2 is configured, last backup time, and a "Backup Now" button
 - **Restart Gateway** - Kill and restart the moltbot gateway process
 - **Device Pairing** - View pending requests, approve devices individually or all at once, view paired devices
+- **CDP URL** (optional) - Patch browser automation endpoint in OpenClaw config
+
+There are **no** R2 backup, “Backup Now”, or restore controls in the admin UI; OpenClaw data sync to R2 runs inside the container only.
 
 The admin UI requires Cloudflare Access authentication (or `DEV_MODE=true` for local development).
 
@@ -342,7 +339,10 @@ If Cloudflare Access still intercepts `/cdp` on your main worker, deploy a **CDP
    npx wrangler secret put CDP_SECRET --config wrangler.cdp.jsonc
    ```
 
-3. **Do not add** `moltbot-cdp` to any Cloudflare Access application. It stays public; auth is via `?secret=` only.
+3. **Do not add** `moltbot-cdp` to any Cloudflare Access application. It stays public; auth is via `?secret=` only. If you previously added it, remove it:
+   ```bash
+   CLOUDFLARE_API_TOKEN=xxx ./scripts/delete-cdp-access-app.sh
+   ```
 
 4. Point OpenClaw at moltbot-cdp (either via env or manual config):
 
@@ -351,7 +351,7 @@ If Cloudflare Access still intercepts `/cdp` on your main worker, deploy a **CDP
    npx wrangler secret put OPENCLAW_CDP_URL
    # When prompted, enter: wss://moltbot-cdp.alex-94f.workers.dev/cdp?secret=YOUR_CDP_SECRET
    ```
-   The startup script patches `browser.profiles.default.cdpUrl` at container boot. No redeploy needed—the next cold start will pick it up.
+   The startup script patches `browser.profiles.default` and `cloudflare` at container boot. The cloudflare-browser skill also uses this. No redeploy needed—the next cold start will pick it up.
 
    **Option B – Manual config** – Add to `openclaw.json` inside the container or via R2 backup:
    ```json
@@ -370,7 +370,7 @@ The container includes pre-installed skills in `/root/clawd/skills/`:
 
 ### cloudflare-browser
 
-Browser automation via the CDP shim. Requires `CDP_SECRET` and `WORKER_URL` to be set (see [Browser Automation](#optional-browser-automation-cdp) above).
+Browser automation via the CDP shim. Prefers `OPENCLAW_CDP_URL` (moltbot-cdp); otherwise requires `WORKER_URL` + `CDP_SECRET` pointing to moltbot-cdp (see [Browser Automation](#optional-browser-automation-cdp) above).
 
 **Scripts:**
 - `screenshot.js` - Capture a screenshot of a URL
@@ -478,7 +478,9 @@ The previous `AI_GATEWAY_API_KEY` + `AI_GATEWAY_BASE_URL` approach is still supp
 | `SLACK_BOT_TOKEN` | No | Slack bot token |
 | `SLACK_APP_TOKEN` | No | Slack app token |
 | `CDP_SECRET` | No | Shared secret for CDP endpoint authentication (see [Browser Automation](#optional-browser-automation-cdp)) |
-| `WORKER_URL` | No | Public URL of the worker (required for CDP) |
+| `WORKER_URL` | No | Public `https://` URL of **this** worker (e.g. `https://moltbot-sandbox.xxx.workers.dev`). Sets Control UI `allowedOrigins` so chat is not blocked with “origin not allowed”; also used for CDP URL construction when applicable |
+| `OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS` | No | Comma-separated extra allowed origins for the Control UI (custom domains, previews). `WORKER_URL` origin is added automatically |
+| `OPENCLAW_CDP_URL` | No | Full CDP WebSocket URL (e.g. `wss://moltbot-cdp.xxx.workers.dev/cdp?secret=...`). Preferred for browser automation when using a separate CDP worker |
 
 ## Security Considerations
 
@@ -500,11 +502,15 @@ OpenClaw in Cloudflare Sandbox uses multiple authentication layers:
 
 **Config changes not working:** Edit the `# Build cache bust:` comment in `Dockerfile` and redeploy
 
+**Control UI: “origin not allowed”:** Set `WORKER_URL` to your worker’s public `https://…` URL (`npx wrangler secret put WORKER_URL`), redeploy so the container picks up `gateway.controlUi.allowedOrigins`. Optional: `OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS` for extra domains
+
 **Slow first request:** Cold starts take 1-2 minutes. Subsequent requests are faster.
 
 **R2 not mounting:** Check that all three R2 secrets are set (`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `CF_ACCOUNT_ID`). Note: R2 mounting only works in production, not with `wrangler dev`.
 
 **Access denied on admin routes:** Ensure `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_AUD` are set, and that your Cloudflare Access application is configured correctly.
+
+**HTTP 302 on `/api/patch-cdp-url` or `/api/startup-logs`:** Cloudflare Access blocks these paths before they reach the Worker. Add a Bypass policy for these paths in Zero Trust → Access → Applications. See [docs/CLOUDFLARE_ACCESS_SANDBOX_PUBLIC_API_BYPASS.md](docs/CLOUDFLARE_ACCESS_SANDBOX_PUBLIC_API_BYPASS.md).
 
 **Devices not appearing in admin UI:** Device list commands take 10-15 seconds due to WebSocket connection overhead. Wait and refresh.
 

@@ -1,6 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "moltbot-cdp",
+  "account_id": "e94f8d1967cde96eaaa449480e79e3d1",
   "main": "src/cdp-worker.ts",
   "compatibility_date": "2025-05-06",
   "compatibility_flags": ["nodejs_compat"],

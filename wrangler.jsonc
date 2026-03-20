@@ -63,10 +63,7 @@
       "bucket_name": "moltbot-data",
     },
   ],
-  // Cron trigger to sync moltbot data to R2 every 5 minutes
-  "triggers": {
-    "crons": ["*/5 * * * *"],
-  },
+  // OpenClaw data sync to R2 runs inside the container (see start-openclaw.sh background loop), not on a Worker cron.
   // Browser Rendering binding for CDP shim
   "browser": {
     "binding": "BROWSER",
